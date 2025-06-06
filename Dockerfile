@@ -1,5 +1,4 @@
-# Dockerfile
-
+# 使用官方 Python 镜像作为基础
 FROM python:3.10-slim-bookworm AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -46,18 +45,20 @@ RUN mkdir -p /app/logs && \
     chown -R appuser:appgroup /app && \
     chown -R appuser:appgroup /home/appuser
 
+# 使用正确的 supervisord 配置文件路径
 COPY supervisord.conf /etc/supervisor/conf.d/app.conf
 
-#新增解决 ❌ 错误 (--internal-launch-mode): 执行 camoufox.server.launch_server 时发生异常: Version information not found at /app/.cache/camoufox/version.json. Please run `camoufox fetch` to install.
 RUN mkdir -p /var/cache/camoufox && \
-    # 2. 从 builder 阶段复制 camoufox 的缓存文件到最终镜像的 /var/cache/camoufox
-    # 这是最关键的一步，确保文件内容存在
     cp -a /root/.cache/camoufox/* /var/cache/camoufox/ && \
-    # 3. 创建 appuser 期望的缓存路径
     mkdir -p /app/.cache && \
-    # 4. 创建软链接，将 /app/.cache/camoufox 指向实际文件所在位置
     ln -s /var/cache/camoufox /app/.cache/camoufox 
-#新增结束
+
+# --- 新增的修改 START ---
+# 复制并设置入口脚本
+COPY entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["entrypoint.sh"]
+# --- 新增的修改 END ---
 
 EXPOSE 2048
 EXPOSE 3120
@@ -66,9 +67,8 @@ USER appuser
 ENV HOME=/app
 ENV PLAYWRIGHT_BROWSERS_PATH=/home/appuser/.cache/ms-playwright
 
+# 这些环境变量现在由 supervisord.conf 直接读取
 ENV PYTHONUNBUFFERED=1
-ENV SERVER_PORT=2048
-ENV STREAM_PORT=3120
-ENV INTERNAL_CAMOUFOX_PROXY=""
 
+# 启动命令
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/app.conf"]
