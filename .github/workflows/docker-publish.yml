@@ -1,37 +1,52 @@
-# 工作流名称
 name: Build and Push Docker Image to Docker Hub
 
-# 触发条件：当有代码推送到 main 分支时，或手动触发时
 on:
   push:
-    branches: [ "main" ]
+    # --- 核心修改 START ---
+    # 监听所有我们关心的分支
+    branches: [ "main", "rollback-test", "final-rollback-test" ] 
+    # --- 核心修改 END ---
   workflow_dispatch:
 
-# 任务
 jobs:
   build-and-push:
-    # 运行环境
     runs-on: ubuntu-latest
-
-    # 步骤
     steps:
-      # 1. 检出代码：将仓库代码下载到运行环境中
+      # 1. 检出代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 登录 Docker Hub：使用我们之前设置的机密信息
+      # 2. 动态检查 Dockerfile 的正确路径
+      - name: Check Dockerfile path
+        id: check_dockerfile
+        run: |
+          if [ -f docker/Dockerfile ]; then
+            echo "path=docker/Dockerfile" >> $GITHUB_OUTPUT
+          else
+            echo "path=Dockerfile" >> $GITHUB_OUTPUT
+          fi
+
+      # 3. 登录 Docker Hub
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 3. 构建并推送 Docker 镜像
+      # 4. 构建并推送，使用动态路径和动态标签
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: .  # 使用当前目录作为构建上下文
-          push: true  # 确认推送
-          # 自动为镜像打标签，格式为 "你的DockerHub用户名/仓库名:latest"
-          # ${{ github.repository }} 会自动变成 "你的GitHub用户名/AIstudioProxyAPI"
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/aistudio-proxy:latest 
+          context: .
+          file: ${{ steps.check_dockerfile.outputs.path }} 
+          push: true
+          # --- 核心修改 START ---
+          # 增加对 final-rollback-test 分支的标签逻辑
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/aistudio-proxy:${{
+              github.ref_name == 'main' && 'latest' ||
+              github.ref_name == 'rollback-test' && 'rollback' ||
+              github.ref_name == 'final-rollback-test' && 'rollback-final' ||
+              'dev'
+            }}
+          # --- 核心修改 END ---
