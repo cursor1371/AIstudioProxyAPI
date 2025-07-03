@@ -1,0 +1,52 @@
+# 工作流程的名称
+name: Build and Push Docker Image
+
+# 触发工作流程的事件
+on:
+  # 当有代码推送到 main 分支时触发
+  push:
+    branches: [ "main" ]
+  # 允许在 GitHub Actions 页面手动触发
+  workflow_dispatch:
+
+# 定义工作任务
+jobs:
+  build:
+    # 运行任务的虚拟环境
+    runs-on: ubuntu-latest
+
+    # 任务步骤
+    steps:
+      # 第一步：检出代码
+      # 这会把你的仓库代码下载到虚拟环境中
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 第二步：登录到 Docker Hub
+      # 使用我们之前设置的 Secrets
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 第三步：从 Secret 恢复认证文件 (关键步骤！)
+      - name: Create auth_profiles directory
+        run: mkdir -p auth_profiles/active
+      
+      - name: Recreate auth.json from secret
+        # 这个命令会读取我们存储的秘密内容，并写入到正确的文件路径下
+        run: echo "${{ secrets.AUTH_JSON_CONTENT }}" > auth_profiles/active/auth.json
+
+      # 第四步：构建并推送 Docker 镜像
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          # 构建上下文的路径，. 表示项目根目录
+          context: .
+          # 指定 Dockerfile 的路径
+          file: ./docker/Dockerfile
+          # 设置为 true，表示构建后推送到仓库
+          push: true
+          # 为镜像打标签，这里使用了你的 Docker Hub 用户名
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/aistudio-proxy:latest
