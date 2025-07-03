@@ -1,0 +1,35 @@
+# .github/workflows/docker-publish.yml
+name: Build and Push Docker Image to Docker Hub
+
+# 当代码被推送到 main 分支时，自动触发此工作流
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build_and_push:
+    # 使用最新的Ubuntu系统作为构建环境
+    runs-on: ubuntu-latest
+
+    steps:
+      # 第一步：检出你的代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 第二步：登录到Docker Hub
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 第三步：构建并推送Docker镜像
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/aistudio-proxy:latest
+          # 镜像标签格式：你的用户名/aistudio-proxy:latest
+          # 你也可以修改 aistudio-proxy 为你喜欢的名字
