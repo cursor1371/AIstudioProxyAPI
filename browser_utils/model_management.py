@@ -280,7 +280,7 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
                 page_display_match = True
             else:
                 try:
-                    model_name_locator = page.locator('mat-select[data-test-ms-model-selector] div.model-option-content span.gmat-body-medium')
+                    model_name_locator = page.locator('mat-select[data-test-ms-model-selector] .model-option-content span')
                     actual_displayed_model_name_on_page_raw = await model_name_locator.first.inner_text(timeout=5000)
                     actual_displayed_model_name_on_page = actual_displayed_model_name_on_page_raw.strip()
                     normalized_actual_display = actual_displayed_model_name_on_page.lower()
@@ -306,7 +306,7 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
         current_displayed_name_for_revert_stripped = "无法读取"
         
         try:
-            model_name_locator_revert = page.locator('mat-select[data-test-ms-model-selector] div.model-option-content span.gmat-body-medium')
+            model_name_locator_revert = page.locator('mat-select[data-test-ms-model-selector] .model-option-content span')
             current_displayed_name_for_revert_raw = await model_name_locator_revert.first.inner_text(timeout=5000)
             current_displayed_name_for_revert_stripped = current_displayed_name_for_revert_raw.strip()
             logger.info(f"[{req_id}] 恢复：页面当前显示的模型名称 (原始: '{current_displayed_name_for_revert_raw}', 清理后: '{current_displayed_name_for_revert_stripped}')")
@@ -529,7 +529,7 @@ async def _set_model_from_page_display(page: AsyncPage, set_storage: bool = Fals
     
     try:
         logger.info("   尝试从页面显示元素读取当前模型名称...")
-        model_name_locator = page.locator('mat-select[data-test-ms-model-selector] div.model-option-content span.gmat-body-medium')
+        model_name_locator = page.locator('mat-select[data-test-ms-model-selector] .model-option-content span')
         displayed_model_name_from_page_raw = await model_name_locator.first.inner_text(timeout=7000)
         displayed_model_name = displayed_model_name_from_page_raw.strip()
         logger.info(f"   页面当前显示模型名称 (原始: '{displayed_model_name_from_page_raw}', 清理后: '{displayed_model_name}')")

@@ -416,7 +416,7 @@ async def _initialize_page_logic(browser: AsyncBrowser):
             await expect_async(found_page.locator(INPUT_SELECTOR)).to_be_visible(timeout=10000)
             logger.info("-> ✅ 核心输入区域可见。")
             
-            model_name_locator = found_page.locator('mat-select[data-test-ms-model-selector] div.model-option-content span.gmat-body-medium')
+            model_name_locator = found_page.locator('mat-select[data-test-ms-model-selector] .model-option-content span')
             try:
                 model_name_on_page = await model_name_locator.first.inner_text(timeout=5000)
                 logger.info(f"-> 🤖 页面检测到的当前模型: {model_name_on_page}")
