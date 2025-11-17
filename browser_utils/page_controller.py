@@ -81,7 +81,6 @@ class PageController:
         从请求参数中智能提取思考模式的设置。
         优先检查 'extra_body.google.thinking_config'，然后回退到顶层的 'reasoning_effort'。
         """
-        # 优先路径: 检查符合 Cherry Studio 等客户端的 extra_body 结构
         extra_body = request_params.get('extra_body')
         if isinstance(extra_body, dict):
             google_config = extra_body.get('google')
@@ -108,24 +107,27 @@ class PageController:
     async def _handle_thinking_budget(self, request_params: Dict[str, Any], check_client_disconnected: Callable):
         """处理思考模式和预算的调整逻辑。"""
         
-        # 使用新的辅助函数来获取思考模式的设置
         reasoning_effort = self._get_reasoning_effort_from_params(request_params)
-
         directive = normalize_reasoning_effort(reasoning_effort)
         self.logger.info(f"[{self.req_id}] 思考模式指令: {format_directive_log(directive)}")
 
-        if not directive.thinking_enabled:
-            self.logger.info(f"[{self.req_id}] 尝试关闭主思考开关...")
-            success = await self._control_thinking_mode_toggle(should_be_enabled=False, check_client_disconnected=check_client_disconnected)
-            if not success:
-                self.logger.warning(f"[{self.req_id}] 主思考开关不可用或关闭失败，使用降级方案：设置预算为 0")
-                await self._control_thinking_budget_toggle(should_be_checked=True, check_client_disconnected=check_client_disconnected)
-                await self._set_thinking_budget_value(0, check_client_disconnected)
+        # 尝试设置主思考开关
+        thinking_toggle_success = await self._control_thinking_mode_toggle(
+            should_be_enabled=directive.thinking_enabled,
+            check_client_disconnected=check_client_disconnected
+        )
+        
+        # 如果主思考开关操作失败（例如，因为UI禁用且状态冲突），则不再继续
+        if not thinking_toggle_success:
+            self.logger.warning(f"[{self.req_id}] 主思考开关未能设置为期望状态，将中止思考预算的后续调整。")
             return
 
-        self.logger.info(f"[{self.req_id}] 开启主思考开关...")
-        await self._control_thinking_mode_toggle(should_be_enabled=True, check_client_disconnected=check_client_disconnected)
-
+        # 如果指令是关闭思考，且已成功（或已处于关闭状态），则直接返回
+        if not directive.thinking_enabled:
+            self.logger.info(f"[{self.req_id}] 思考模式已关闭或已设置为关闭，无需调整预算。")
+            return
+            
+        # 主思考开关已成功开启，现在根据指令调整预算
         if not directive.budget_enabled:
             self.logger.info(f"[{self.req_id}] 关闭手动预算限制...")
             await self._control_thinking_budget_toggle(should_be_checked=False, check_client_disconnected=check_client_disconnected)
@@ -249,9 +251,7 @@ class PageController:
             if isinstance(e, ClientDisconnectedError): raise
 
     async def _control_thinking_mode_toggle(self, should_be_enabled: bool, check_client_disconnected: Callable) -> bool:
-        """
-        控制主思考开关，并处理其被禁用的情况。
-        """
+        """控制主思考开关，并处理其被禁用的情况。"""
         toggle_selector = ENABLE_THINKING_MODE_TOGGLE_SELECTOR
         self.logger.info(f"[{self.req_id}] 控制主思考开关，期望状态: {'开启' if should_be_enabled else '关闭'}...")
         try:
@@ -259,7 +259,6 @@ class PageController:
             await expect_async(toggle_locator).to_be_visible(timeout=5000)
             await self._check_disconnect(check_client_disconnected, "主思考开关 - 元素可见后")
 
-            # **核心修正：检查开关是否被禁用**
             if await toggle_locator.is_disabled(timeout=1000):
                 self.logger.info(f"[{self.req_id}] 主思考开关被禁用 (UI上为灰色)。")
                 is_checked_str = await toggle_locator.get_attribute("aria-checked")
@@ -271,7 +270,6 @@ class PageController:
                     self.logger.error(f"[{self.req_id}] ❌ 无法设置思考模式：开关被禁用且其状态({current_state_is_enabled})与期望状态({should_be_enabled})冲突。")
                     return False
 
-            # 开关是可点击的，执行原有逻辑
             is_checked_str = await toggle_locator.get_attribute("aria-checked")
             current_state_is_enabled = is_checked_str == "true"
             self.logger.info(f"[{self.req_id}] 主思考开关当前状态: {is_checked_str} (是否开启: {current_state_is_enabled})")
