@@ -9,7 +9,6 @@ from playwright.async_api import Page as AsyncPage, expect as expect_async, Time
 from config import (
     TEMPERATURE_INPUT_SELECTOR, MAX_OUTPUT_TOKENS_SELECTOR, STOP_SEQUENCE_INPUT_SELECTOR,
     MAT_CHIP_REMOVE_BUTTON_SELECTOR, TOP_P_INPUT_SELECTOR, SUBMIT_BUTTON_SELECTOR,
-    CLEAR_CHAT_BUTTON_SELECTOR, CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR, OVERLAY_SELECTOR,
     PROMPT_TEXTAREA_SELECTOR, RESPONSE_CONTAINER_SELECTOR, RESPONSE_TEXT_SELECTOR,
     EDIT_MESSAGE_BUTTON_SELECTOR, USE_URL_CONTEXT_SELECTOR, UPLOAD_BUTTON_SELECTOR,
     ENABLE_THINKING_MODE_TOGGLE_SELECTOR, SET_THINKING_BUDGET_TOGGLE_SELECTOR, THINKING_BUDGET_INPUT_SELECTOR,
@@ -22,7 +21,7 @@ from config import (
 )
 from models import ClientDisconnectedError
 from .operations import save_error_snapshot, _wait_for_response_completion, _get_final_response_content
-from .thinking_normalizer import normalize_reasoning_effort, format_directive_log
+from .thinking_normalizer import normalize_thinking_directive, format_directive_log
 
 class PageController:
     """封装了与AI Studio页面交互的所有操作。"""
@@ -76,38 +75,18 @@ class PageController:
 
         # 调整 Google Search 开关
         await self._adjust_google_search(request_params, check_client_disconnected)
-    
+
     async def _handle_thinking_budget(self, request_params: Dict[str, Any], check_client_disconnected: Callable):
-        """处理思考模式和预算的调整逻辑，兼容顶层`reasoning_effort`和`extra_body`。"""
-        reasoning_effort = request_params.get('reasoning_effort')
-        extra_body = request_params.get('extra_body')
-        if isinstance(extra_body, dict):
-            google_config = extra_body.get('google')
-            if isinstance(google_config, dict):
-                thinking_config = google_config.get('thinking_config')
-                if isinstance(thinking_config, dict):
-                    self.logger.info(f"[{self.req_id}] 检测到 'extra_body.google.thinking_config' 载荷，优先使用此配置。")
-                    include_thoughts = thinking_config.get('include_thoughts', False)
-                    thinking_budget = thinking_config.get('thinking_budget')
-                    if include_thoughts:
-                        if thinking_budget is not None and isinstance(thinking_budget, int) and thinking_budget > 0:
-                            reasoning_effort = thinking_budget
-                            self.logger.info(f"[{self.req_id}] 从 extra_body 提取到预算: {thinking_budget} tokens。")
-                        else:
-                            reasoning_effort = -1
-                            self.logger.info(f"[{self.req_id}] 从 extra_body 启用思考模式，无特定预算，视为不限制。")
-                    else:
-                        reasoning_effort = 0
-                        self.logger.info(f"[{self.req_id}] 从 extra_body 检测到 'include_thoughts' 为 false，将关闭思考模式。")
-        
-        directive = normalize_reasoning_effort(reasoning_effort)
+        """处理思考模式和预算的调整逻辑。"""
+        # 修正：传递整个 request_params 以便正确解析
+        directive = normalize_thinking_directive(request_params)
         self.logger.info(f"[{self.req_id}] 思考模式指令: {format_directive_log(directive)}")
 
         if not directive.thinking_enabled:
             self.logger.info(f"[{self.req_id}] 尝试关闭主思考开关...")
             success = await self._control_thinking_mode_toggle(should_be_enabled=False, check_client_disconnected=check_client_disconnected)
             if not success:
-                self.logger.warning(f"[{self.req_id}] 主思考开关不可用，使用降级方案：设置预算为 0")
+                self.logger.warning(f"[{self.req_id}] 主思考开关不可用或无法关闭，使用降级方案：设置预算为 0")
                 await self._control_thinking_budget_toggle(should_be_checked=True, check_client_disconnected=check_client_disconnected)
                 await self._set_thinking_budget_value(0, check_client_disconnected)
             return
@@ -130,9 +109,11 @@ class PageController:
         try:
             await expect_async(budget_input_locator).to_be_visible(timeout=5000)
             await self._check_disconnect(check_client_disconnected, "思考预算调整 - 输入框可见后")
+            
             self.logger.info(f"[{self.req_id}] 设置思考预算为: {token_budget}")
             await budget_input_locator.fill(str(token_budget), timeout=5000)
             await self._check_disconnect(check_client_disconnected, "思考预算调整 - 填充输入框后")
+
             await asyncio.sleep(0.1)
             new_value_str = await budget_input_locator.input_value(timeout=3000)
             if int(new_value_str) == token_budget:
@@ -193,7 +174,7 @@ class PageController:
             if isinstance(e, ClientDisconnectedError): raise
 
     async def _ensure_tools_panel_expanded(self, check_client_disconnected: Callable):
-        """确保包含高级工具（URL上下文、思考预算等）的面板是展开的。"""
+        """确保包含高级工具的面板是展开的。"""
         self.logger.info(f"[{self.req_id}] 检查并确保工具面板已展开...")
         try:
             collapse_tools_locator = self.page.locator('button[aria-label="Expand or collapse tools"]')
@@ -213,7 +194,7 @@ class PageController:
             if isinstance(e, ClientDisconnectedError): raise
 
     async def _open_url_content(self,check_client_disconnected: Callable):
-        """仅负责打开 URL Context 开关，前提是面板已展开。"""
+        """仅负责打开 URL Context 开关。"""
         try:
             self.logger.info(f"[{self.req_id}] 检查并启用 URL Context 开关...")
             use_url_content_selector = self.page.locator(USE_URL_CONTEXT_SELECTOR)
@@ -231,55 +212,64 @@ class PageController:
             if isinstance(e, ClientDisconnectedError): raise
 
     # ==================================================================================
-    # vvvvvvvvvvvvvvvvvvvv   此函数为本次修正的核心   vvvvvvvvvvvvvvvvvvvvvv
+    # vvvvvvvvvvvvvvvvvvvv   核心修正区域：思考模式控制   vvvvvvvvvvvvvvvvvvvvvv
     # ==================================================================================
     async def _control_thinking_mode_toggle(self, should_be_enabled: bool, check_client_disconnected: Callable) -> bool:
         """
-        健壮地控制主思考开关，处理其被禁用的情况。
+        智能控制主思考开关，处理其可能被禁用的情况。
         """
         toggle_selector = ENABLE_THINKING_MODE_TOGGLE_SELECTOR
-        self.logger.info(f"[{self.req_id}] 控制主思考开关，期望状态: {'开启' if should_be_enabled else '关闭'}...")
+        self.logger.info(f"[{self.req_id}] (v2) 控制主思考开关，期望状态: {'开启' if should_be_enabled else '关闭'}...")
+
         try:
             toggle_locator = self.page.locator(toggle_selector)
             await expect_async(toggle_locator).to_be_visible(timeout=5000)
             await self._check_disconnect(check_client_disconnected, "主思考开关 - 元素可见后")
 
+            # 检查开关是否被禁用
+            is_disabled = await toggle_locator.is_disabled()
             is_checked_str = await toggle_locator.get_attribute("aria-checked")
-            is_currently_checked = is_checked_str == "true"
-            self.logger.info(f"[{self.req_id}] 主思考开关当前状态: {is_checked_str} (是否开启: {is_currently_checked})")
+            current_state_is_enabled = is_checked_str == "true"
+            self.logger.info(f"[{self.req_id}] (v2) 主思考开关当前状态: checked={is_checked_str}, disabled={is_disabled}")
 
-            if is_currently_checked != should_be_enabled:
-                # 检查开关是否可点击
-                if not await toggle_locator.is_enabled(timeout=1000):
-                    self.logger.warning(f"[{self.req_id}] ⚠️ 主思考开关被UI禁用（灰色不可选），无法切换到期望状态 {'开启' if should_be_enabled else '关闭'}。")
-                    return False # 明确返回失败，让上层决定如何处理
+            # 如果开关被禁用
+            if is_disabled:
+                if current_state_is_enabled == should_be_enabled:
+                    self.logger.info(f"[{self.req_id}] (v2) ✅ 主思考开关已禁用且处于期望状态 ({'开启' if should_be_enabled else '关闭'})，无需操作。")
+                    return True
+                else:
+                    self.logger.warning(f"[{self.req_id}] (v2) ⚠️ 主思考开关已禁用，无法将其从 '{current_state_is_enabled}' 切换到 '{should_be_enabled}'。")
+                    return False # 明确告知操作无法完成
 
+            # 如果开关可用，则执行点击逻辑
+            if current_state_is_enabled != should_be_enabled:
                 action = "开启" if should_be_enabled else "关闭"
-                self.logger.info(f"[{self.req_id}] 主思考开关需要切换，正在点击以{action}思考模式...")
+                self.logger.info(f"[{self.req_id}] (v2) 主思考开关需要切换，正在点击以{action}...")
                 await toggle_locator.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, f"主思考开关 - 点击{action}后")
                 await asyncio.sleep(0.5)
 
                 new_state_str = await toggle_locator.get_attribute("aria-checked")
                 if (new_state_str == "true") == should_be_enabled:
-                    self.logger.info(f"[{self.req_id}] ✅ 主思考开关已成功{action}。新状态: {new_state_str}")
+                    self.logger.info(f"[{self.req_id}] (v2) ✅ 主思考开关已成功{action}。新状态: {new_state_str}")
                     return True
                 else:
-                    self.logger.warning(f"[{self.req_id}] ⚠️ 主思考开关{action}后验证失败。期望: {should_be_enabled}, 实际: {new_state_str}")
+                    self.logger.warning(f"[{self.req_id}] (v2) ⚠️ 主思考开关{action}后验证失败。期望: {should_be_enabled}, 实际: {new_state_str}")
                     return False
             else:
-                self.logger.info(f"[{self.req_id}] 主思考开关已处于期望状态，无需操作。")
+                self.logger.info(f"[{self.req_id}] (v2) 主思考开关已处于期望状态，无需操作。")
                 return True
+
         except TimeoutError:
-            self.logger.warning(f"[{self.req_id}] ⚠️ 主思考开关元素未找到或不可见（当前模型可能不支持思考模式）。")
+            self.logger.warning(f"[{self.req_id}] (v2) ⚠️ 主思考开关元素未找到或不可见（当前模型可能不支持思考模式）。")
             return False
         except Exception as e:
-            self.logger.error(f"[{self.req_id}] ❌ 操作主思考开关时发生错误: {e}")
-            await save_error_snapshot(f"thinking_mode_toggle_error_{self.req_id}")
+            self.logger.error(f"[{self.req_id}] (v2) ❌ 操作主思考开关时发生错误: {e}")
+            await save_error_snapshot(f"thinking_mode_toggle_error_v2_{self.req_id}")
             if isinstance(e, ClientDisconnectedError): raise
             return False
     # ==================================================================================
-    # ^^^^^^^^^^^^^^^^^^^^   此函数为本次修正的核心   ^^^^^^^^^^^^^^^^^^^^^^^^
+    # ^^^^^^^^^^^^^^^^^^^^   核心修正区域：思考模式控制   ^^^^^^^^^^^^^^^^^^^^^^^^
     # ==================================================================================
 
     async def _control_thinking_budget_toggle(self, should_be_checked: bool, check_client_disconnected: Callable):
@@ -362,7 +352,8 @@ class PageController:
         """调整最大输出Token参数。"""
         async with params_cache_lock:
             self.logger.info(f"[{self.req_id}] 检查并调整最大输出 Token 设置...")
-            min_val_for_tokens, max_val_for_tokens_from_model = 1, 65536
+            min_val_for_tokens = 1
+            max_val_for_tokens_from_model = 65536
             if model_id_to_use and parsed_model_list:
                 current_model_data = next((m for m in parsed_model_list if m.get("id") == model_id_to_use), None)
                 if current_model_data and current_model_data.get("supported_max_output_tokens") is not None:
@@ -486,58 +477,6 @@ class PageController:
             await save_error_snapshot(f"top_p_error_{self.req_id}")
             if isinstance(e, ClientDisconnectedError): raise
 
-    async def clear_chat_history(self, check_client_disconnected: Callable):
-        """通过直接导航到新聊天URL来清空聊天记录，并确保临时聊天模式被重新启用。"""
-        self.logger.info(f"[{self.req_id}] (v2) 开始清空聊天记录 (通过直接导航)...")
-        await self._check_disconnect(check_client_disconnected, "Start Clear Chat")
-        new_chat_url = f"https://{AI_STUDIO_URL_PATTERN}prompts/new_chat"
-        try:
-            self.logger.info(f"[{self.req_id}] (v2) 导航到: {new_chat_url}")
-            await self.page.goto(new_chat_url, wait_until="domcontentloaded", timeout=30000)
-            await expect_async(self.page.locator(PROMPT_TEXTAREA_SELECTOR)).to_be_visible(timeout=30000)
-            self.logger.info(f"[{self.req_id}] (v2) ✅ 页面已成功导航并加载。")
-            await self._enable_temporary_chat_mode_robustly(check_client_disconnected)
-            await self._verify_chat_cleared(check_client_disconnected)
-            self.logger.info(f"[{self.req_id}] (v2) ✅ 聊天历史清空完成。")
-        except Exception as e_clear:
-            self.logger.error(f"[{self.req_id}] (v2) 清空聊天过程中发生错误: {e_clear}")
-            if not isinstance(e_clear, (ClientDisconnectedError, TimeoutError)):
-                await save_error_snapshot(f"clear_chat_error_v2_{self.req_id}")
-            raise
-
-    async def _enable_temporary_chat_mode_robustly(self, check_client_disconnected: Callable):
-        """健壮地检查并启用“临时聊天”模式。"""
-        self.logger.info(f"[{self.req_id}] (v2) 检查并启用'临时聊天'模式...")
-        await self._check_disconnect(check_client_disconnected, "Enable Temp Chat")
-        try:
-            toggle_locator = self.page.locator('button[aria-label="Temporary chat toggle"]')
-            await expect_async(toggle_locator).to_be_visible(timeout=5000)
-            button_classes = await toggle_locator.get_attribute("class") or ""
-            if 'ms-button-active' in button_classes:
-                self.logger.info(f"[{self.req_id}] (v2) '临时聊天'模式已激活，无需操作。")
-            else:
-                self.logger.info(f"[{self.req_id}] (v2) '临时聊天'模式未激活，正在点击...")
-                await toggle_locator.click(timeout=CLICK_TIMEOUT_MS)
-                await asyncio.sleep(0.5)
-                updated_classes = await toggle_locator.get_attribute("class") or ""
-                if 'ms-button-active' in updated_classes:
-                    self.logger.info(f"[{self.req_id}] (v2) ✅ '临时聊天'模式已成功启用。")
-                else:
-                    self.logger.warning(f"[{self.req_id}] (v2) ⚠️ 点击后'临时聊天'模式状态验证失败。")
-        except Exception as e:
-            self.logger.warning(f"[{self.req_id}] (v2) ⚠️ 启用'临时聊天'模式时发生非致命错误: {e}")
-            await save_error_snapshot(f"enable_temp_chat_error_{self.req_id}")
-
-    async def _verify_chat_cleared(self, check_client_disconnected: Callable):
-        """验证聊天已清空"""
-        last_response_container = self.page.locator(RESPONSE_CONTAINER_SELECTOR).last
-        await asyncio.sleep(0.5)
-        await self._check_disconnect(check_client_disconnected, "After Clear Post-Delay")
-        try:
-            await expect_async(last_response_container).to_be_hidden(timeout=CLEAR_CHAT_VERIFY_TIMEOUT_MS - 500)
-            self.logger.info(f"[{self.req_id}] ✅ 聊天已成功清空 (验证通过 - 最后响应容器隐藏)。")
-        except Exception as verify_err:
-            self.logger.warning(f"[{self.req_id}] ⚠️ 警告: 清空聊天验证失败 (最后响应容器未隐藏): {verify_err}")
     async def submit_prompt(self, prompt: str,image_list: List, check_client_disconnected: Callable):
         """提交提示到页面。"""
         self.logger.info(f"[{self.req_id}] 填充并提交提示 ({len(prompt)} chars)...")
@@ -596,222 +535,6 @@ class PageController:
             if not isinstance(e_input_submit, ClientDisconnectedError):
                 await save_error_snapshot(f"input_submit_error_{self.req_id}")
             raise
-    
-    async def _handle_post_upload_dialog(self):
-        """处理上传后可能出现的授权/版权确认对话框。"""
-        try:
-            overlay_container = self.page.locator('div.cdk-overlay-container')
-            if await overlay_container.count() == 0: return
-            agree_texts = ['Agree', 'I agree', 'Allow', 'Continue', 'OK', '确定', '同意', '继续', '允许']
-            for text in agree_texts:
-                try:
-                    btn = overlay_container.locator(f"button:has-text('{text}')")
-                    if await btn.count() > 0 and await btn.first.is_visible(timeout=300):
-                        await btn.first.click()
-                        self.logger.info(f"[{self.req_id}] 上传后对话框: 点击按钮 '{text}'。")
-                        await asyncio.sleep(0.3)
-                        break
-                except Exception: continue
-            try:
-                acknow_btn_locator = self.page.locator('button[aria-label*="copyright" i], button[aria-label*="acknowledge" i]')
-                if await acknow_btn_locator.count() > 0 and await acknow_btn_locator.first.is_visible(timeout=300):
-                    await acknow_btn_locator.first.click()
-                    self.logger.info(f"[{self.req_id}] 上传后对话框: 点击版权确认按钮 (aria-label 匹配)。")
-                    await asyncio.sleep(0.3)
-            except Exception: pass
-            try:
-                overlay_backdrop = self.page.locator('div.cdk-overlay-backdrop.cdk-overlay-backdrop-showing')
-                if await overlay_backdrop.count() > 0:
-                    try:
-                        await expect_async(overlay_backdrop).to_be_hidden(timeout=3000)
-                        self.logger.info(f"[{self.req_id}] 上传后对话框遮罩层已隐藏。")
-                    except Exception: self.logger.warning(f"[{self.req_id}] 上传后对话框遮罩层仍存在，后续提交可能被拦截。")
-            except Exception: pass
-        except Exception: pass
-
-    async def _open_upload_menu_and_choose_file(self, files_list: List[str]) -> bool:
-        """通过'Insert assets'菜单选择'上传/Upload'项并打开文件选择器设置文件。"""
-        try:
-            try:
-                tb = self.page.locator('div.cdk-overlay-backdrop.cdk-overlay-transparent-backdrop.cdk-overlay-backdrop-showing')
-                if await tb.count() > 0 and await tb.first.is_visible(timeout=300):
-                    await self.page.keyboard.press('Escape')
-                    await asyncio.sleep(0.2)
-            except Exception: pass
-            trigger = self.page.locator('button[aria-label="Insert assets such as images, videos, files, or audio"]')
-            await trigger.click()
-            menu_container = self.page.locator('div.cdk-overlay-container')
-            try:
-                await expect_async(menu_container.locator("div[role='menu']").first).to_be_visible(timeout=3000)
-            except Exception:
-                try:
-                    await trigger.click()
-                    await expect_async(menu_container.locator("div[role='menu']").first).to_be_visible(timeout=3000)
-                except Exception:
-                    self.logger.warning(f"[{self.req_id}] 未能显示上传菜单面板。")
-                    return False
-            try:
-                upload_btn = menu_container.locator("div[role='menu'] button[role='menuitem'][aria-label='Upload File']")
-                if await upload_btn.count() == 0: upload_btn = menu_container.locator("div[role='menu'] button[role='menuitem']:has-text('Upload File')")
-                if await upload_btn.count() == 0:
-                    self.logger.warning(f"[{self.req_id}] 未找到 'Upload File' 菜单项。")
-                    return False
-                btn = upload_btn.first
-                await expect_async(btn).to_be_visible(timeout=2000)
-                input_loc = btn.locator('input[type="file"]')
-                if await input_loc.count() > 0:
-                    await input_loc.set_input_files(files_list)
-                    self.logger.info(f"[{self.req_id}] ✅ 通过菜单项(Upload File) 隐藏 input 设置文件成功: {len(files_list)} 个")
-                else:
-                    async with self.page.expect_file_chooser() as fc_info: await btn.click()
-                    file_chooser = await fc_info.value
-                    await file_chooser.set_files(files_list)
-                    self.logger.info(f"[{self.req_id}] ✅ 通过文件选择器设置文件成功: {len(files_list)} 个")
-            except Exception as e_set:
-                self.logger.error(f"[{self.req_id}] 设置文件失败: {e_set}")
-                return False
-            try:
-                backdrop = self.page.locator('div.cdk-overlay-backdrop.cdk-overlay-backdrop-showing, div.cdk-overlay-backdrop.cdk-overlay-transparent-backdrop.cdk-overlay-backdrop-showing')
-                if await backdrop.count() > 0:
-                    await self.page.keyboard.press('Escape')
-                    await asyncio.sleep(0.2)
-            except Exception: pass
-            await self._handle_post_upload_dialog()
-            return True
-        except Exception as e:
-            self.logger.error(f"[{self.req_id}] 通过上传菜单设置文件失败: {e}")
-            return False
-
-    async def _try_enter_submit(self, prompt_textarea_locator, check_client_disconnected: Callable) -> bool:
-        """优先使用回车键提交。"""
-        import os
-        try:
-            host_os_from_launcher = os.environ.get('HOST_OS_FOR_SHORTCUT')
-            is_mac_determined = False
-            if host_os_from_launcher == "Darwin": is_mac_determined = True
-            elif host_os_from_launcher in ["Windows", "Linux"]: is_mac_determined = False
-            else:
-                try: user_agent_data_platform = await self.page.evaluate("() => navigator.userAgentData?.platform || ''")
-                except Exception:
-                    user_agent_string = await self.page.evaluate("() => navigator.userAgent || ''")
-                    user_agent_string_lower = user_agent_string.lower()
-                    if "macintosh" in user_agent_string_lower or "mac os x" in user_agent_string_lower: user_agent_data_platform = "macOS"
-                    else: user_agent_data_platform = "Other"
-                is_mac_determined = "mac" in user_agent_data_platform.lower()
-            await prompt_textarea_locator.focus(timeout=5000)
-            await self._check_disconnect(check_client_disconnected, "After Input Focus")
-            await asyncio.sleep(0.1)
-            original_content = ""
-            try: original_content = await prompt_textarea_locator.input_value(timeout=2000) or ""
-            except Exception: pass
-            self.logger.info(f"[{self.req_id}] 尝试回车键提交")
-            try: await self.page.keyboard.press('Enter')
-            except Exception:
-                try: await prompt_textarea_locator.press('Enter')
-                except Exception: pass
-            await self._check_disconnect(check_client_disconnected, "After Enter Press")
-            await asyncio.sleep(2.0)
-            submission_success = False
-            try:
-                current_content = await prompt_textarea_locator.input_value(timeout=2000) or ""
-                if original_content and not current_content.strip():
-                    self.logger.info(f"[{self.req_id}] 验证方法1: 输入框已清空，回车键提交成功")
-                    submission_success = True
-                if not submission_success:
-                    submit_button_locator = self.page.locator(SUBMIT_BUTTON_SELECTOR)
-                    try:
-                        if await submit_button_locator.is_disabled(timeout=2000):
-                            self.logger.info(f"[{self.req_id}] 验证方法2: 提交按钮已禁用，回车键提交成功")
-                            submission_success = True
-                    except Exception: pass
-                if not submission_success:
-                    try:
-                        response_container = self.page.locator(RESPONSE_CONTAINER_SELECTOR)
-                        if await response_container.count() > 0 and await response_container.last.is_visible(timeout=1000):
-                            self.logger.info(f"[{self.req_id}] 验证方法3: 检测到响应容器，回车键提交成功")
-                            submission_success = True
-                    except Exception: pass
-            except Exception as verify_err:
-                self.logger.warning(f"[{self.req_id}] 回车键提交验证过程出错: {verify_err}")
-                submission_success = True
-            if submission_success:
-                self.logger.info(f"[{self.req_id}] ✅ 回车键提交成功")
-                return True
-            else:
-                self.logger.warning(f"[{self.req_id}] ⚠️ 回车键提交验证失败")
-                return False
-        except Exception as shortcut_err:
-            self.logger.warning(f"[{self.req_id}] 回车键提交失败: {shortcut_err}")
-            return False
-
-    async def _try_combo_submit(self, prompt_textarea_locator, check_client_disconnected: Callable) -> bool:
-        """尝试使用组合键提交 (Meta/Control + Enter)。"""
-        import os
-        try:
-            host_os_from_launcher = os.environ.get('HOST_OS_FOR_SHORTCUT')
-            is_mac_determined = False
-            if host_os_from_launcher == "Darwin": is_mac_determined = True
-            elif host_os_from_launcher in ["Windows", "Linux"]: is_mac_determined = False
-            else:
-                try: user_agent_data_platform = await self.page.evaluate("() => navigator.userAgentData?.platform || ''")
-                except Exception:
-                    user_agent_string = await self.page.evaluate("() => navigator.userAgent || ''")
-                    user_agent_string_lower = user_agent_string.lower()
-                    if "macintosh" in user_agent_string_lower or "mac os x" in user_agent_string_lower: user_agent_data_platform = "macOS"
-                    else: user_agent_data_platform = "Other"
-                is_mac_determined = "mac" in user_agent_data_platform.lower()
-            shortcut_modifier = "Meta" if is_mac_determined else "Control"
-            shortcut_key = "Enter"
-            await prompt_textarea_locator.focus(timeout=5000)
-            await self._check_disconnect(check_client_disconnected, "After Input Focus")
-            await asyncio.sleep(0.1)
-            original_content = ""
-            try: original_content = await prompt_textarea_locator.input_value(timeout=2000) or ""
-            except Exception: pass
-            self.logger.info(f"[{self.req_id}] 尝试组合键提交: {shortcut_modifier}+{shortcut_key}")
-            try: await self.page.keyboard.press(f'{shortcut_modifier}+{shortcut_key}')
-            except Exception:
-                try:
-                    await self.page.keyboard.down(shortcut_modifier)
-                    await asyncio.sleep(0.05)
-                    await self.page.keyboard.press(shortcut_key)
-                    await asyncio.sleep(0.05)
-                    await self.page.keyboard.up(shortcut_modifier)
-                except Exception: pass
-            await self._check_disconnect(check_client_disconnected, "After Combo Press")
-            await asyncio.sleep(2.0)
-            submission_success = False
-            try:
-                current_content = await prompt_textarea_locator.input_value(timeout=2000) or ""
-                if original_content and not current_content.strip():
-                    self.logger.info(f"[{self.req_id}] 验证方法1: 输入框已清空，组合键提交成功")
-                    submission_success = True
-                if not submission_success:
-                    submit_button_locator = self.page.locator(SUBMIT_BUTTON_SELECTOR)
-                    try:
-                        if await submit_button_locator.is_disabled(timeout=2000):
-                            self.logger.info(f"[{self.req_id}] 验证方法2: 提交按钮已禁用，组合键提交成功")
-                            submission_success = True
-                    except Exception: pass
-                if not submission_success:
-                    try:
-                        response_container = self.page.locator(RESPONSE_CONTAINER_SELECTOR)
-                        if await response_container.count() > 0 and await response_container.last.is_visible(timeout=1000):
-                            self.logger.info(f"[{self.req_id}] 验证方法3: 检测到响应容器，组合键提交成功")
-                            submission_success = True
-                    except Exception: pass
-            except Exception as verify_err:
-                self.logger.warning(f"[{self.req_id}] 组合键提交验证过程出错: {verify_err}")
-                submission_success = True
-            if submission_success:
-                self.logger.info(f"[{self.req_id}] ✅ 组合键提交成功")
-                return True
-            else:
-                self.logger.warning(f"[{self.req_id}] ⚠️ 组合键提交验证失败")
-                return False
-        except Exception as combo_err:
-            self.logger.warning(f"[{self.req_id}] 组合键提交失败: {combo_err}")
-            return False
 
     async def get_response(self, check_client_disconnected: Callable) -> str:
         """获取响应内容。"""
