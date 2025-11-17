@@ -1,5 +1,7 @@
+# models/chat.py
+
 from typing import List, Optional, Union, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict  # 导入 ConfigDict
 from config import MODEL_NAME
 
 
@@ -62,6 +64,10 @@ class Message(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
+    # ==================== 核心修正：允许额外字段 ====================
+    model_config = ConfigDict(extra='allow')
+    # ============================================================
+
     messages: List[Message]
     model: Optional[str] = MODEL_NAME
     stream: Optional[bool] = False
