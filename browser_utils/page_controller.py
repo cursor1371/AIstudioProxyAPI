@@ -4,6 +4,8 @@ PageController模块
 """
 import asyncio
 import re
+import base64
+import mimetypes
 from typing import Callable, List, Dict, Any, Optional
 
 from playwright.async_api import Page as AsyncPage, expect as expect_async, TimeoutError
@@ -44,6 +46,9 @@ class PageController:
         """调整所有请求参数。"""
         self.logger.info(f"[{self.req_id}] 开始调整所有请求参数...")
         await self._check_disconnect(check_client_disconnected, "Start Parameter Adjustment")
+
+        # [FIX] 在开始调整参数前，主动清理一次可能存在的遮罩层
+        await self._dismiss_backdrops()
 
         # 调整温度
         temp_to_set = request_params.get('temperature', DEFAULT_TEMPERATURE)
@@ -208,6 +213,10 @@ class PageController:
             if should_enable_search != is_currently_checked:
                 action = "打开" if should_enable_search else "关闭"
                 self.logger.info(f"[{self.req_id}] Google Search 开关状态与期望不符。正在点击以{action}...")
+                
+                # [FIX] 在点击前尝试消除遮罩层
+                await self._dismiss_backdrops()
+                
                 await toggle_locator.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, f"Google Search 开关 - 点击{action}后")
                 await asyncio.sleep(0.5) # 等待UI更新
@@ -236,6 +245,10 @@ class PageController:
 
             if class_string and "expanded" not in class_string.split():
                 self.logger.info(f"[{self.req_id}] 工具面板未展开，正在点击以展开...")
+                
+                # [FIX] 在点击前尝试消除遮罩层
+                await self._dismiss_backdrops()
+                
                 await collapse_tools_locator.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, "展开工具面板后")
                 # 等待展开动画完成
@@ -259,6 +272,10 @@ class PageController:
             is_checked = await use_url_content_selector.get_attribute("aria-checked")
             if "false" == is_checked:
                 self.logger.info(f"[{self.req_id}] URL Context 开关未开启，正在点击以开启...")
+                
+                # [FIX] 在点击前尝试消除遮罩层
+                await self._dismiss_backdrops()
+                
                 await use_url_content_selector.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, "点击URLCONTEXT后")
                 self.logger.info(f"[{self.req_id}] ✅ URL Context 开关已点击。")
@@ -299,6 +316,9 @@ class PageController:
             if current_state_is_enabled != should_be_enabled:
                 action = "开启" if should_be_enabled else "关闭"
                 self.logger.info(f"[{self.req_id}] 主思考开关需要切换，正在点击以{action}思考模式...")
+
+                # [FIX] 在点击前尝试消除遮罩层
+                await self._dismiss_backdrops()
 
                 await toggle_locator.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, f"主思考开关 - 点击{action}后")
@@ -350,6 +370,10 @@ class PageController:
             if current_state_is_checked != should_be_checked:
                 action = "启用" if should_be_checked else "禁用"
                 self.logger.info(f"[{self.req_id}] 思考预算开关当前状态与期望不符，正在点击以{action}...")
+                
+                # [FIX] 在点击前尝试消除遮罩层
+                await self._dismiss_backdrops()
+                
                 await toggle_locator.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, f"思考预算开关 - 点击{action}后")
 
@@ -649,14 +673,14 @@ class PageController:
             raise
 
     async def _execute_chat_clear(self, clear_chat_button_locator, confirm_button_locator, overlay_locator, check_client_disconnected: Callable):
-        """执行清空聊天操作"""
+        """执行清空聊天操作（增强版：包含回退机制）"""
         overlay_initially_visible = False
         try:
             if await overlay_locator.is_visible(timeout=1000):
                 overlay_initially_visible = True
-                self.logger.info(f"[{self.req_id}] 清空聊天确认遮罩层已可见。直接点击\"继续\"。")
+                self.logger.info(f"[{self.req_id}] 清空聊天确认遮罩层已可见。直接尝试点击确认。")
         except TimeoutError:
-            self.logger.info(f"[{self.req_id}] 清空聊天确认遮罩层初始不可见 (检查超时或未找到)。")
+            self.logger.info(f"[{self.req_id}] 清空聊天确认遮罩层初始不可见。")
             overlay_initially_visible = False
         except Exception as e_vis_check:
             self.logger.warning(f"[{self.req_id}] 检查遮罩层可见性时发生错误: {e_vis_check}。假定不可见。")
@@ -664,30 +688,26 @@ class PageController:
 
         await self._check_disconnect(check_client_disconnected, "清空聊天 - 初始遮罩层检查后")
 
-        if overlay_initially_visible:
-            self.logger.info(f"[{self.req_id}] 点击\"继续\"按钮 (遮罩层已存在): {CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR}")
-            await confirm_button_locator.click(timeout=CLICK_TIMEOUT_MS)
-        else:
+        # 如果遮罩层还没出现，先点击"清空聊天"按钮触发它
+        if not overlay_initially_visible:
             self.logger.info(f"[{self.req_id}] 点击\"清空聊天\"按钮: {CLEAR_CHAT_BUTTON_SELECTOR}")
-            # 若存在透明遮罩层拦截指针事件，先尝试清理
+            # 先清理可能阻挡点击的无关遮罩
             try:
                 await self._dismiss_backdrops()
             except Exception:
                 pass
+                
             try:
                 await clear_chat_button_locator.click(timeout=CLICK_TIMEOUT_MS)
             except Exception as first_click_err:
-                # 尝试再次清理遮罩，并使用 force 点击作为兜底
                 self.logger.warning(f"[{self.req_id}] 清空按钮第一次点击失败，尝试清理遮罩并强制点击: {first_click_err}")
                 try:
                     await self._dismiss_backdrops()
-                except Exception:
-                    pass
-                try:
                     await clear_chat_button_locator.click(timeout=CLICK_TIMEOUT_MS, force=True)
                 except Exception as force_click_err:
                     self.logger.error(f"[{self.req_id}] 清空按钮强制点击仍失败: {force_click_err}")
                     raise
+            
             await self._check_disconnect(check_client_disconnected, "清空聊天 - 点击\"清空聊天\"后")
 
             try:
@@ -695,14 +715,43 @@ class PageController:
                 await expect_async(overlay_locator).to_be_visible(timeout=WAIT_FOR_ELEMENT_TIMEOUT_MS)
                 self.logger.info(f"[{self.req_id}] 清空聊天确认遮罩层已出现。")
             except TimeoutError:
-                error_msg = f"等待清空聊天确认遮罩层超时 (点击清空按钮后)。请求 ID: {self.req_id}"
+                error_msg = f"等待清空聊天确认遮罩层超时。请求 ID: {self.req_id}"
                 self.logger.error(error_msg)
                 await save_error_snapshot(f"clear_chat_overlay_timeout_{self.req_id}")
                 raise Exception(error_msg)
 
-            await self._check_disconnect(check_client_disconnected, "清空聊天 - 遮罩层出现后")
-            self.logger.info(f"[{self.req_id}] 点击\"继续\"按钮 (在对话框中): {CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR}")
-            await confirm_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+        await self._check_disconnect(check_client_disconnected, "清空聊天 - 遮罩层出现后")
+
+        # --- 确认按钮点击逻辑 (增强版) ---
+        self.logger.info(f"[{self.req_id}] 准备点击确认按钮...")
+        
+        # 尝试方案 A: 使用配置的特定选择器 (Discard and continue)
+        clicked = False
+        try:
+            # 缩短超时时间，以便快速失败切换到备选方案
+            await expect_async(confirm_button_locator).to_be_visible(timeout=2000)
+            await confirm_button_locator.click(timeout=3000)
+            self.logger.info(f"[{self.req_id}] ✅ 点击\"继续\"按钮成功 (方案A)。")
+            clicked = True
+        except Exception as e_scheme_a:
+            self.logger.warning(f"[{self.req_id}] ⚠️ 方案A (特定文本按钮) 点击失败: {e_scheme_a}。尝试方案B (通用Primary按钮)...")
+
+        # 尝试方案 B: 在遮罩层内查找任何 Primary 样式的按钮
+        if not clicked:
+            try:
+                # 查找遮罩层内的 confirm/submit 按钮
+                # 常见的 Material Design 确认按钮选择器
+                generic_confirm_selector = 'button.ms-button-primary, button[type="submit"], button.mat-mdc-button-base.mat-primary'
+                generic_button = overlay_locator.locator(generic_confirm_selector).first
+                
+                await expect_async(generic_button).to_be_visible(timeout=2000)
+                await generic_button.click(timeout=3000)
+                self.logger.info(f"[{self.req_id}] ✅ 点击\"继续\"按钮成功 (方案B - 通用选择器)。")
+                clicked = True
+            except Exception as e_scheme_b:
+                self.logger.error(f"[{self.req_id}] ❌ 方案B (通用按钮) 也点击失败: {e_scheme_b}")
+                await save_error_snapshot(f"clear_chat_confirm_fail_{self.req_id}")
+                raise Exception(f"无法点击清空确认按钮: {e_scheme_b}")
 
         await self._check_disconnect(check_client_disconnected, "清空聊天 - 点击\"继续\"后")
 
@@ -711,8 +760,8 @@ class PageController:
         for attempt_disappear in range(max_retries_disappear):
             try:
                 self.logger.info(f"[{self.req_id}] 等待清空聊天确认按钮/对话框消失 (尝试 {attempt_disappear + 1}/{max_retries_disappear})...")
-                await expect_async(confirm_button_locator).to_be_hidden(timeout=CLEAR_CHAT_VERIFY_TIMEOUT_MS)
-                await expect_async(overlay_locator).to_be_hidden(timeout=1000)
+                # 这里使用 overlay_locator 来检查消失，比具体的按钮更可靠
+                await expect_async(overlay_locator).to_be_hidden(timeout=CLEAR_CHAT_VERIFY_TIMEOUT_MS)
                 self.logger.info(f"[{self.req_id}] ✅ 清空聊天确认对话框已成功消失。")
                 break
             except TimeoutError:
@@ -726,14 +775,11 @@ class PageController:
                     self.logger.error(error_msg)
                     await save_error_snapshot(f"clear_chat_dialog_disappear_timeout_{self.req_id}")
                     raise Exception(error_msg)
-            except ClientDisconnectedError:
-                self.logger.info(f"[{self.req_id}] 客户端在等待清空确认对话框消失时断开连接。")
-                raise
             except Exception as other_err:
-                self.logger.warning(f"[{self.req_id}] 等待清空确认对话框消失时发生其他错误: {other_err}")
+                # 忽略非致命错误，继续等待
+                self.logger.warning(f"[{self.req_id}] 等待消失时发生轻微错误: {other_err}")
                 if attempt_disappear < max_retries_disappear - 1:
                     await asyncio.sleep(1.0)
-                    continue
                 else:
                     raise
 
@@ -925,10 +971,13 @@ class PageController:
         submit_button_locator = self.page.locator(SUBMIT_BUTTON_SELECTOR)
 
         try:
+            # [修复1] 在操作前先清理可能存在的遮罩/弹窗，防止它们禁用底层UI
+            await self._dismiss_backdrops()
+            
             await expect_async(prompt_textarea_locator).to_be_visible(timeout=5000)
             await self._check_disconnect(check_client_disconnected, "After Input Visible")
 
-            # 使用 JavaScript 填充文本
+            # 1. 使用 JavaScript 快速填充长文本 (速度快)
             await prompt_textarea_locator.evaluate(
                 '''
                 (element, text) => {
@@ -939,7 +988,22 @@ class PageController:
                 ''',
                 prompt
             )
-            await autosize_wrapper_locator.evaluate('(element, text) => { element.setAttribute("data-value", text); }', prompt)
+            # 2. 这里的 update 可能不是必须的，但保留以兼容
+            try:
+                await autosize_wrapper_locator.evaluate('(element, text) => { element.setAttribute("data-value", text); }', prompt)
+            except Exception:
+                pass # 忽略非关键错误
+
+            # [修复2] "唤醒"输入框：模拟键盘操作，确保发送按钮被激活
+            # 很多SPA框架检测不到纯JS的修改，需要真实的键盘事件
+            try:
+                await prompt_textarea_locator.focus()
+                # 输入一个空格然后删除，强制触发框架的变更检测
+                await self.page.keyboard.press("Space")
+                await self.page.keyboard.press("Backspace")
+            except Exception as e:
+                self.logger.warning(f"[{self.req_id}] 模拟键盘唤醒输入框失败 (非致命): {e}")
+
             await self._check_disconnect(check_client_disconnected, "After Input Fill")
 
             # 上传（仅使用菜单 + 隐藏 input 设置文件；处理可能的授权弹窗）
@@ -953,9 +1017,20 @@ class PageController:
                     self.logger.error(f"[{self.req_id}] 在上传文件时发生错误: 通过菜单方式未能设置文件")
 
             # 等待发送按钮启用
-            wait_timeout_ms_submit_enabled = 100000
+            # 缩短超时时间，因为如果前面步骤正确，按钮应该几乎立刻变亮
+            wait_timeout_ms_submit_enabled = 20000 
             try:
                 await self._check_disconnect(check_client_disconnected, "填充提示后等待发送按钮启用 - 前置检查")
+                
+                # 如果按钮还是禁用，再尝试一次兜底的 fill 操作
+                try:
+                    await expect_async(submit_button_locator).to_be_enabled(timeout=2000)
+                except AssertionError:
+                    self.logger.warning(f"[{self.req_id}] 发送按钮仍未启用，尝试使用 type 模拟输入唤醒...")
+                    # 极端的唤醒方式：输入最后一个字符
+                    if prompt:
+                        await prompt_textarea_locator.type(prompt[-1])
+                
                 await expect_async(submit_button_locator).to_be_enabled(timeout=wait_timeout_ms_submit_enabled)
                 self.logger.info(f"[{self.req_id}] ✅ 发送按钮已启用。")
             except Exception as e_pw_enabled:
@@ -966,18 +1041,27 @@ class PageController:
             await self._check_disconnect(check_client_disconnected, "After Submit Button Enabled")
             await asyncio.sleep(0.3)
 
-            # 优先点击按钮提交，其次回车提交，最后组合键提交
+            # [修复3] 提交前再次清理遮罩，防止点击被拦截 (Overlay Intercepted 问题)
+            await self._dismiss_backdrops()
+            await self._handle_post_upload_dialog()
+
+            # 优先点击按钮提交
             button_clicked = False
             try:
                 self.logger.info(f"[{self.req_id}] 尝试点击提交按钮...")
-                # 提交前再处理一次潜在对话框，避免按钮点击被拦截
-                await self._handle_post_upload_dialog()
                 await submit_button_locator.click(timeout=5000)
                 self.logger.info(f"[{self.req_id}] ✅ 提交按钮点击完成。")
                 button_clicked = True
             except Exception as click_err:
                 self.logger.error(f"[{self.req_id}] ❌ 提交按钮点击失败: {click_err}")
-                await save_error_snapshot(f"submit_button_click_fail_{self.req_id}")
+                # 如果点击失败，再次尝试清理遮罩并强制点击
+                try:
+                    await self._dismiss_backdrops()
+                    await submit_button_locator.click(timeout=2000, force=True)
+                    button_clicked = True
+                    self.logger.info(f"[{self.req_id}] ✅ 强制点击提交按钮完成。")
+                except Exception:
+                    await save_error_snapshot(f"submit_button_click_fail_{self.req_id}")
 
             if not button_clicked:
                 self.logger.info(f"[{self.req_id}] 按钮提交失败，尝试回车键提交...")
