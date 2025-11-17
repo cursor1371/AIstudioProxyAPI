@@ -21,6 +21,7 @@ from config import (
 )
 from models import ClientDisconnectedError
 from .operations import save_error_snapshot, _wait_for_response_completion, _get_final_response_content
+# 移除不再需要的 enable_temporary_chat_mode 导入
 from .thinking_normalizer import normalize_reasoning_effort, format_directive_log
 
 class PageController:
@@ -76,12 +77,45 @@ class PageController:
         # 调整 Google Search 开关
         await self._adjust_google_search(request_params, check_client_disconnected)
 
+    # ==================================================================================
+    # vvvvvvvvvvvvvvvvvvvv   此函数为本次修正的核心   vvvvvvvvvvvvvvvvvvvvvv
+    # ==================================================================================
     async def _handle_thinking_budget(self, request_params: Dict[str, Any], check_client_disconnected: Callable):
-        """处理思考模式和预算的调整逻辑。"""
-        reasoning_effort = request_params.get('reasoning_effort')
-        directive = normalize_reasoning_effort(reasoning_effort)
+        """
+        处理思考模式和预算的调整逻辑，兼容`reasoning_effort`和`extra_body`。
+        """
+        reasoning_effort_value = None
+
+        # 优先解析符合Google规范的`extra_body`结构
+        extra_body = request_params.get('extra_body')
+        if isinstance(extra_body, dict):
+            google_config = extra_body.get('google')
+            if isinstance(google_config, dict):
+                thinking_config = google_config.get('thinking_config')
+                if isinstance(thinking_config, dict):
+                    self.logger.info(f"[{self.req_id}] 检测到 'extra_body.google.thinking_config': {thinking_config}")
+                    include_thoughts = thinking_config.get('include_thoughts', False)
+                    thinking_budget = thinking_config.get('thinking_budget')
+
+                    if not include_thoughts:
+                        reasoning_effort_value = 0  # 明确禁用思考
+                    elif thinking_budget is not None and isinstance(thinking_budget, int) and thinking_budget >= 0:
+                        reasoning_effort_value = thinking_budget  # 使用指定的预算
+                    else:
+                        # `include_thoughts`为true但没有有效预算，表示无限制
+                        reasoning_effort_value = -1
+
+        # 如果未从`extra_body`中解析到配置，则回退到检查`reasoning_effort`参数
+        if reasoning_effort_value is None:
+            reasoning_effort_value = request_params.get('reasoning_effort')
+            if reasoning_effort_value is not None:
+                self.logger.info(f"[{self.req_id}] 使用 'reasoning_effort' 参数: {reasoning_effort_value}")
+
+        # 使用归一化模块处理最终确定的值
+        directive = normalize_reasoning_effort(reasoning_effort_value)
         self.logger.info(f"[{self.req_id}] 思考模式指令: {format_directive_log(directive)}")
 
+        # --- 后续逻辑保持不变 ---
         if not directive.thinking_enabled:
             self.logger.info(f"[{self.req_id}] 尝试关闭主思考开关...")
             success = await self._control_thinking_mode_toggle(should_be_enabled=False, check_client_disconnected=check_client_disconnected)
@@ -101,6 +135,9 @@ class PageController:
             self.logger.info(f"[{self.req_id}] 开启手动预算限制并设置预算值: {directive.budget_value} tokens")
             await self._control_thinking_budget_toggle(should_be_checked=True, check_client_disconnected=check_client_disconnected)
             await self._set_thinking_budget_value(directive.budget_value, check_client_disconnected)
+    # ==================================================================================
+    # ^^^^^^^^^^^^^^^^^^^^   此函数为本次修正的核心   ^^^^^^^^^^^^^^^^^^^^^^^^
+    # ==================================================================================
 
     async def _set_thinking_budget_value(self, token_budget: int, check_client_disconnected: Callable):
         """设置思考预算的具体数值。"""
@@ -289,15 +326,12 @@ class PageController:
             clamped_temp = max(0.0, min(2.0, temperature))
             if clamped_temp != temperature:
                 self.logger.warning(f"[{self.req_id}] 请求的温度 {temperature} 超出范围 [0, 2]，已调整为 {clamped_temp}")
-
             cached_temp = page_params_cache.get("temperature")
             if cached_temp is not None and abs(cached_temp - clamped_temp) < 0.001:
                 self.logger.info(f"[{self.req_id}] 温度 ({clamped_temp}) 与缓存值 ({cached_temp}) 一致。跳过页面交互。")
                 return
-
             self.logger.info(f"[{self.req_id}] 请求温度 ({clamped_temp}) 与缓存值 ({cached_temp}) 不一致或缓存中无值。需要与页面交互。")
             temp_input_locator = self.page.locator(TEMPERATURE_INPUT_SELECTOR)
-
             try:
                 await expect_async(temp_input_locator).to_be_visible(timeout=5000)
                 await self._check_disconnect(check_client_disconnected, "温度调整 - 输入框可见后")
@@ -462,32 +496,19 @@ class PageController:
             await save_error_snapshot(f"top_p_error_{self.req_id}")
             if isinstance(e, ClientDisconnectedError): raise
 
-    # ==================================================================================
-    # vvvvvvvvvvvvvvvvvvvv   核心修正区域：清空聊天记录   vvvvvvvvvvvvvvvvvvvvvv
-    # ==================================================================================
     async def clear_chat_history(self, check_client_disconnected: Callable):
-        """
-        通过直接导航到新聊天URL来清空聊天记录，并确保临时聊天模式被重新启用。
-        """
+        """通过直接导航到新聊天URL来清空聊天记录，并确保临时聊天模式被重新启用。"""
         self.logger.info(f"[{self.req_id}] (v2) 开始清空聊天记录 (通过直接导航)...")
         await self._check_disconnect(check_client_disconnected, "Start Clear Chat")
-
         new_chat_url = f"https://{AI_STUDIO_URL_PATTERN}prompts/new_chat"
-
         try:
-            # 步骤1: 直接导航到新聊天页面
             self.logger.info(f"[{self.req_id}] (v2) 导航到: {new_chat_url}")
             await self.page.goto(new_chat_url, wait_until="domcontentloaded", timeout=30000)
             await expect_async(self.page.locator(PROMPT_TEXTAREA_SELECTOR)).to_be_visible(timeout=30000)
             self.logger.info(f"[{self.req_id}] (v2) ✅ 页面已成功导航并加载。")
-
-            # 步骤2: 重新启用“临时聊天”模式
             await self._enable_temporary_chat_mode_robustly(check_client_disconnected)
-
-            # 步骤3: 验证清空状态
             await self._verify_chat_cleared(check_client_disconnected)
             self.logger.info(f"[{self.req_id}] (v2) ✅ 聊天历史清空完成。")
-
         except Exception as e_clear:
             self.logger.error(f"[{self.req_id}] (v2) 清空聊天过程中发生错误: {e_clear}")
             if not isinstance(e_clear, (ClientDisconnectedError, TimeoutError)):
@@ -498,34 +519,24 @@ class PageController:
         """健壮地检查并启用“临时聊天”模式。"""
         self.logger.info(f"[{self.req_id}] (v2) 检查并启用'临时聊天'模式...")
         await self._check_disconnect(check_client_disconnected, "Enable Temp Chat")
-        
         try:
             toggle_locator = self.page.locator('button[aria-label="Temporary chat toggle"]')
-            await expect_async(toggle_locator).to_be_visible(timeout=5000) # 等待按钮可见
-
+            await expect_async(toggle_locator).to_be_visible(timeout=5000)
             button_classes = await toggle_locator.get_attribute("class") or ""
-            
             if 'ms-button-active' in button_classes:
                 self.logger.info(f"[{self.req_id}] (v2) '临时聊天'模式已激活，无需操作。")
             else:
                 self.logger.info(f"[{self.req_id}] (v2) '临时聊天'模式未激活，正在点击...")
                 await toggle_locator.click(timeout=CLICK_TIMEOUT_MS)
-                await asyncio.sleep(0.5) # 等待UI响应
-                
-                # 再次验证
+                await asyncio.sleep(0.5)
                 updated_classes = await toggle_locator.get_attribute("class") or ""
                 if 'ms-button-active' in updated_classes:
                     self.logger.info(f"[{self.req_id}] (v2) ✅ '临时聊天'模式已成功启用。")
                 else:
                     self.logger.warning(f"[{self.req_id}] (v2) ⚠️ 点击后'临时聊天'模式状态验证失败。")
         except Exception as e:
-            # 这是一个“尽力而为”的操作，失败时不应阻塞主流程
             self.logger.warning(f"[{self.req_id}] (v2) ⚠️ 启用'临时聊天'模式时发生非致命错误: {e}")
             await save_error_snapshot(f"enable_temp_chat_error_{self.req_id}")
-
-    # ==================================================================================
-    # ^^^^^^^^^^^^^^^^^^^^   核心修正区域：清空聊天记录   ^^^^^^^^^^^^^^^^^^^^^^^^
-    # ==================================================================================
 
     async def _verify_chat_cleared(self, check_client_disconnected: Callable):
         """验证聊天已清空"""
@@ -853,4 +864,3 @@ class PageController:
             self.logger.error(f"[{self.req_id}] ❌ 获取响应时出错: {e}")
             if not isinstance(e, ClientDisconnectedError): await save_error_snapshot(f"get_response_error_{self.req_id}")
             raise
-
