@@ -1,5 +1,3 @@
-# models/chat.py
-
 from typing import List, Optional, Union, Dict, Any
 from pydantic import BaseModel
 from config import MODEL_NAME
@@ -80,9 +78,3 @@ class ChatCompletionRequest(BaseModel):
     attachments: Optional[List[Any]] = None
     # MCP per-request endpoint（可选），用于工具调用回退到 MCP 服务
     mcp_endpoint: Optional[str] = None
-    
-    # ==================== 核心修正区域 ====================
-    # 添加 extra_body 字段以接收非标准载荷
-    extra_body: Optional[Dict[str, Any]] = None
-    # ======================================================
-
