@@ -12,8 +12,7 @@ INPUT_SELECTOR2 = PROMPT_TEXTAREA_SELECTOR
 # 发送按钮：优先匹配 aria-label="Run" 的按钮；如页面结构变更，可退化到容器内的提交按钮。
 SUBMIT_BUTTON_SELECTOR = 'button[aria-label="Run"].run-button, ms-run-button button[type="submit"].run-button'
 CLEAR_CHAT_BUTTON_SELECTOR = 'button[data-test-clear="outside"][aria-label="New chat"]'
-# [修正] 使用更通用的选择器匹配确认按钮 (支持 Confirm/Discard/MDC标准动作)
-CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR = 'mat-dialog-container button:has-text("Confirm"), mat-dialog-container button:has-text("Discard"), button[data-mdc-dialog-action="confirm"]'
+CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR = 'button.ms-button-primary:has-text("Discard and continue")'
 UPLOAD_BUTTON_SELECTOR = 'button[aria-label^="Insert assets"]'
 
 # --- 响应相关选择器 ---
