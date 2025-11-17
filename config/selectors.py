@@ -46,23 +46,22 @@ TEMPERATURE_INPUT_SELECTOR = 'ms-slider input[type="number"][max="2"]'
 USE_URL_CONTEXT_SELECTOR = 'button[aria-label="Browse the url context"]'
 
 # ==================================================================================
-# vvvvvvvvvvvvvvvvvvvv   核心修正区域：思考模式选择器   vvvvvvvvvvvvvvvvvvvvvv
+# vvvvvvvvvvvvvvvvvvvv   核心修正区域：思考模式选择器 v2.0   vvvvvvvvvvvvvvvvvvvvvv
 # ==================================================================================
 
-# --- 思考模式相关选择器 (已更新为更健壮的定位方式) ---
-# 主思考开关：通过其可见文本标签 "Thinking mode" 定位。
-ENABLE_THINKING_MODE_TOGGLE_SELECTOR = 'mat-slide-toggle:has-text("Thinking mode")'
+# --- 思考模式相关选择器 (已更新为基于父容器和标签文本的健壮定位方式) ---
+# 主思考开关：定位包含"Thinking mode"文本的设置项，然后在其内部寻找mat-slide-toggle。
+ENABLE_THINKING_MODE_TOGGLE_SELECTOR = 'div.settings-item:has-text("Thinking mode") mat-slide-toggle'
 
-# 手动预算开关：通过其可见文本标签 "Set thinking budget" 定位。
-SET_THINKING_BUDGET_TOGGLE_SELECTOR = 'mat-slide-toggle:has-text("Set thinking budget")'
+# 手动预算开关：定位包含"Set thinking budget"文本的设置项，然后在其内部寻找mat-slide-toggle。
+SET_THINKING_BUDGET_TOGGLE_SELECTOR = 'div.settings-item:has-text("Set thinking budget") mat-slide-toggle'
 
-# 思考预算输入框：保持不变，因为它依赖于 aria-label，相对稳定。
-THINKING_BUDGET_INPUT_SELECTOR = '[data-test-slider] input[type="number"]'
+# 思考预算输入框：定位包含"Set thinking budget"文本的设置项，然后在其内部寻找数字输入框。
+THINKING_BUDGET_INPUT_SELECTOR = 'div.settings-item:has-text("Set thinking budget") input[type="number"]'
 
 # ==================================================================================
-# ^^^^^^^^^^^^^^^^^^^^   核心修正区域：思考模式选择器   ^^^^^^^^^^^^^^^^^^^^^^^^
+# ^^^^^^^^^^^^^^^^^^^^   核心修正区域：思考模式选择器 v2.0   ^^^^^^^^^^^^^^^^^^^^^^^^
 # ==================================================================================
-
 
 # --- Google Search Grounding ---
 GROUNDING_WITH_GOOGLE_SEARCH_TOGGLE_SELECTOR = 'div[data-test-id="searchAsAToolTooltip"] mat-slide-toggle button'
