@@ -6,10 +6,17 @@
 import asyncio
 import time
 from fastapi import HTTPException
+from typing import Any, Dict, Optional, Tuple
+from .error_utils import (
+    client_disconnected,
+    client_cancelled,
+    processing_timeout,
+    server_error,
+)
 
 
 
-async def queue_worker():
+async def queue_worker() -> None:
     """队列工作器，处理请求队列中的任务"""
     # 导入全局变量
     from server import (
@@ -77,7 +84,7 @@ async def queue_worker():
                                         item["cancelled"] = True
                                         item_future = item.get("result_future")
                                         if item_future and not item_future.done():
-                                            item_future.set_exception(HTTPException(status_code=499, detail=f"[{item_req_id}] Client disconnected while queued."))
+                                            item_future.set_exception(client_disconnected(item_req_id, "Client disconnected while queued."))
                                 except Exception as check_err:
                                     logger.error(f"[{item_req_id}] (Worker Queue Check) Error checking disconnect: {check_err}")
                         
@@ -104,7 +111,7 @@ async def queue_worker():
             if request_item.get("cancelled", False):
                 logger.info(f"[{req_id}] (Worker) 请求已取消，跳过。")
                 if not result_future.done():
-                    result_future.set_exception(HTTPException(status_code=499, detail=f"[{req_id}] 请求已被用户取消"))
+                    result_future.set_exception(client_cancelled(req_id, "请求已被用户取消"))
                 request_queue.task_done()
                 continue
 
@@ -291,11 +298,11 @@ async def queue_worker():
                         except asyncio.TimeoutError:
                             logger.warning(f"[{req_id}] (Worker) ⚠️ 等待处理完成超时。")
                             if not result_future.done():
-                                result_future.set_exception(HTTPException(status_code=504, detail=f"[{req_id}] Processing timed out waiting for completion."))
+                                result_future.set_exception(processing_timeout(req_id, "Processing timed out waiting for completion."))
                         except Exception as ev_wait_err:
                             logger.error(f"[{req_id}] (Worker) ❌ 等待处理完成时出错: {ev_wait_err}")
                             if not result_future.done():
-                                result_future.set_exception(HTTPException(status_code=500, detail=f"[{req_id}] Error waiting for completion: {ev_wait_err}"))
+                                result_future.set_exception(server_error(req_id, f"Error waiting for completion: {ev_wait_err}"))
                         finally:
                             # 清理断开连接监控任务
                             if 'disconnect_monitor_task' in locals() and not disconnect_monitor_task.done():
@@ -308,7 +315,7 @@ async def queue_worker():
                     except Exception as process_err:
                         logger.error(f"[{req_id}] (Worker) _process_request_refactored execution error: {process_err}")
                         if not result_future.done():
-                            result_future.set_exception(HTTPException(status_code=500, detail=f"[{req_id}] Request processing error: {process_err}"))
+                            result_future.set_exception(server_error(req_id, f"Request processing error: {process_err}"))
             
             logger.info(f"[{req_id}] (Worker) 释放处理锁。")
 
@@ -343,7 +350,7 @@ async def queue_worker():
         except Exception as e:
             logger.error(f"[{req_id}] (Worker) ❌ 处理请求时发生意外错误: {e}", exc_info=True)
             if result_future and not result_future.done():
-                result_future.set_exception(HTTPException(status_code=500, detail=f"[{req_id}] 服务器内部错误: {e}"))
+                result_future.set_exception(server_error(req_id, f"服务器内部错误: {e}"))
         finally:
             if request_item:
                 request_queue.task_done()

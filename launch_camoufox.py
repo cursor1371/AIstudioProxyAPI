@@ -384,7 +384,7 @@ def get_proxy_from_gsettings():
                 value = process_result.stdout.strip()
                 if value.startswith("'") and value.endswith("'"): # Remove surrounding single quotes
                     value = value[1:-1]
-                
+
                 # If after stripping quotes, value is empty, or it's a gsettings "empty" representation
                 if not value or value == "''" or value == "@as []" or value == "[]":
                     return None
@@ -423,7 +423,7 @@ def get_proxy_from_gsettings():
                     return f"http://{https_host}:{https_port}"
             except ValueError:
                 pass
-    
+
     return None
 
 
@@ -544,7 +544,7 @@ if __name__ == "__main__":
     mode_selection_group.add_argument("--debug", action="store_true", help="启动调试模式 (浏览器界面可见，允许交互式认证)")
     mode_selection_group.add_argument("--headless", action="store_true", help="启动无头模式 (浏览器无界面，需要预先保存的认证文件)")
     mode_selection_group.add_argument("--virtual-display", action="store_true", help="启动无头模式并使用虚拟显示 (Xvfb, 仅限 Linux)") # from dev
-    
+
     # --camoufox-os 参数已移除，将由脚本内部自动检测系统并设置
     parser.add_argument( # from dev
         "--active-auth-json", type=str, default=None,
@@ -555,9 +555,17 @@ if __name__ == "__main__":
         "--auto-save-auth", action='store_true',
         help="[调试模式] 在登录成功后，如果之前未加载认证文件，则自动提示并保存新的认证状态。"
     )
+    parser.add_argument(
+        "--save-auth-as", type=str, default=None,
+        help="[调试模式] 指定保存新认证文件的文件名 (不含.json后缀)。"
+    )
     parser.add_argument( # from dev
         "--auth-save-timeout", type=int, default=DEFAULT_AUTH_SAVE_TIMEOUT,
         help=f"[调试模式] 自动保存认证或输入认证文件名的等待超时时间 (秒)。默认: {DEFAULT_AUTH_SAVE_TIMEOUT}"
+    )
+    parser.add_argument(
+        "--exit-on-auth-save", action='store_true',
+        help="[调试模式] 在通过UI成功保存新的认证文件后，自动关闭启动器和所有相关进程。"
     )
     # 日志相关参数 (from dev)
     parser.add_argument(
@@ -600,7 +608,7 @@ if __name__ == "__main__":
         proxy_config = determine_proxy_configuration(args.internal_camoufox_proxy)
         actual_proxy_to_use = proxy_config['camoufox_proxy']
         print(f"--- [内部Camoufox启动] 代理配置: {proxy_config['source']} ---", flush=True)
-        
+
         camoufox_proxy_internal = actual_proxy_to_use # 更新此变量以供后续使用
         camoufox_os_internal = args.internal_camoufox_os
 
@@ -608,13 +616,14 @@ if __name__ == "__main__":
         print(f"--- [内部Camoufox启动] 模式: {internal_mode_arg}, 认证文件: {os.path.basename(auth_file) if auth_file else '无'}, "
               f"Camoufox端口: {camoufox_port_internal}, 代理: {camoufox_proxy_internal or '无'}, 模拟OS: {camoufox_os_internal} ---", flush=True)
         print(f"--- [内部Camoufox启动] 正在调用 camoufox.server.launch_server ... ---", flush=True)
-        
+
         try:
             launch_args_for_internal_camoufox = {
                 "port": camoufox_port_internal,
                 "addons": [],
                 # "proxy": camoufox_proxy_internal, # 已移除
                 "exclude_addons": [DefaultAddons.UBO], # Assuming DefaultAddons.UBO exists
+                "window": (1440, 900)
             }
 
             # 正确添加代理的方式
@@ -623,7 +632,7 @@ if __name__ == "__main__":
             # 如果 camoufox_proxy_internal 是 None 或空字符串，"proxy" 键就不会被添加。
             if auth_file:
                 launch_args_for_internal_camoufox["storage_state"] = auth_file
-            
+
             if "," in camoufox_os_internal:
                 camoufox_os_list_internal = [s.strip().lower() for s in camoufox_os_internal.split(',')]
                 valid_os_values = ["windows", "macos", "linux"]
@@ -633,10 +642,10 @@ if __name__ == "__main__":
                 launch_args_for_internal_camoufox['os'] = camoufox_os_list_internal
             elif camoufox_os_internal.lower() in ["windows", "macos", "linux"]:
                 launch_args_for_internal_camoufox['os'] = camoufox_os_internal.lower()
-            elif camoufox_os_internal.lower() != "random": 
+            elif camoufox_os_internal.lower() != "random":
                 print(f"❌ 内部Camoufox启动错误: camoufox_os_internal 值无效: '{camoufox_os_internal}'", file=sys.stderr)
                 sys.exit(1)
-            
+
             print(f"  传递给 launch_server 的参数: {launch_args_for_internal_camoufox}", flush=True)
 
             if internal_mode_arg == 'headless':
@@ -645,13 +654,13 @@ if __name__ == "__main__":
                 launch_server(headless="virtual", **launch_args_for_internal_camoufox)
             elif internal_mode_arg == 'debug':
                 launch_server(headless=False, **launch_args_for_internal_camoufox)
-            
+
             print(f"--- [内部Camoufox启动] camoufox.server.launch_server ({internal_mode_arg}模式) 调用已完成/阻塞。脚本将等待其结束。 ---", flush=True)
         except Exception as e_internal_launch_final:
             print(f"❌ 错误 (--internal-launch-mode): 执行 camoufox.server.launch_server 时发生异常: {e_internal_launch_final}", file=sys.stderr, flush=True)
             traceback.print_exc(file=sys.stderr)
             sys.exit(1)
-        sys.exit(0) 
+        sys.exit(0)
 
     # --- 主启动器逻辑 ---
     logger.info("🚀 Camoufox 启动器开始运行 🚀")
@@ -659,7 +668,7 @@ if __name__ == "__main__":
     ensure_auth_dirs_exist()
     check_dependencies()
     logger.info("=================================================")
-    
+
     deprecated_auth_state_path = os.path.join(os.path.dirname(__file__), "auth_state.json")
     if os.path.exists(deprecated_auth_state_path):
         logger.warning(f"检测到已弃用的认证文件: {deprecated_auth_state_path}。此文件不再被直接使用。")
@@ -716,6 +725,39 @@ if __name__ == "__main__":
     logger.info(f"最终选择的启动模式: {final_launch_mode.replace('_', ' ')}模式")
     logger.info("-------------------------------------------------")
 
+    effective_active_auth_json_path = None # 提前初始化
+
+    # --- 交互式认证文件创建逻辑 ---
+    if final_launch_mode == 'debug' and not args.active_auth_json:
+        create_new_auth_choice = input_with_timeout(
+            "  是否要创建并保存新的认证文件? (y/n; 默认: n, 15s超时): ", 15
+        ).strip().lower()
+        if create_new_auth_choice == 'y':
+            new_auth_filename = ""
+            while not new_auth_filename:
+                new_auth_filename_input = input_with_timeout(
+                    f"  请输入要保存的文件名 (不含.json后缀, 字母/数字/-/_): ", args.auth_save_timeout
+                ).strip()
+                # 简单的合法性校验
+                if re.match(r"^[a-zA-Z0-9_-]+$", new_auth_filename_input):
+                    new_auth_filename = new_auth_filename_input
+                elif new_auth_filename_input == "":
+                    logger.info("输入为空或超时，取消创建新认证文件。")
+                    break
+                else:
+                    print("  文件名包含无效字符，请重试。")
+
+            if new_auth_filename:
+                args.auto_save_auth = True
+                args.save_auth_as = new_auth_filename
+                logger.info(f"  好的，登录成功后将自动保存认证文件为: {new_auth_filename}.json")
+                # 在这种模式下，不应该加载任何现有的认证文件
+                if effective_active_auth_json_path:
+                    logger.info("  由于将创建新的认证文件，已清除先前加载的认证文件设置。")
+                    effective_active_auth_json_path = None
+        else:
+            logger.info("  好的，将不创建新的认证文件。")
+
     if final_launch_mode == 'virtual_headless' and platform.system() == "Linux": # from dev
         logger.info("--- 检查 Xvfb (虚拟显示) 依赖 ---")
         if not shutil.which("Xvfb"):
@@ -732,14 +774,14 @@ if __name__ == "__main__":
         pids_on_port = find_pids_on_port(server_target_port)
         if pids_on_port:
             logger.warning(f"     识别到以下进程 PID 可能占用了端口 {server_target_port}: {pids_on_port}")
-            if final_launch_mode == 'debug': 
+            if final_launch_mode == 'debug':
                 sys.stderr.flush()
                 # Using input_with_timeout for consistency, though timeout might not be strictly needed here
                 choice = input_with_timeout(f"     是否尝试终止这些进程？ (y/n, 输入 n 将继续并可能导致启动失败, 15s超时): ", 15).strip().lower()
                 if choice == 'y':
                     logger.info("     用户选择尝试终止进程...")
                     all_killed = all(kill_process_interactive(pid) for pid in pids_on_port)
-                    time.sleep(2) 
+                    time.sleep(2)
                     if not is_port_in_use(server_target_port, host=uvicorn_bind_host):
                         logger.info(f"     ✅ 端口 {server_target_port} (主机 {uvicorn_bind_host}) 现在可用。")
                         port_is_available = True
@@ -747,11 +789,11 @@ if __name__ == "__main__":
                         logger.error(f"     ❌ 尝试终止后，端口 {server_target_port} (主机 {uvicorn_bind_host}) 仍然被占用。")
                 else:
                     logger.info("     用户选择不自动终止或超时。将继续尝试启动服务器。")
-            else: 
+            else:
                  logger.error(f"     无头模式下，不会尝试自动终止占用端口的进程。服务器启动可能会失败。")
         else:
             logger.warning(f"     未能自动识别占用端口 {server_target_port} 的进程。服务器启动可能会失败。")
-        
+
         if not port_is_available:
             logger.warning(f"--- 端口 {server_target_port} 仍可能被占用。继续启动服务器，它将自行处理端口绑定。 ---")
     else:
@@ -761,12 +803,12 @@ if __name__ == "__main__":
 
     logger.info("--- 步骤 3: 准备并启动 Camoufox 内部进程 ---")
     captured_ws_endpoint = None
-    effective_active_auth_json_path = None # from dev
+    # effective_active_auth_json_path = None # from dev # 已提前
 
     if args.active_auth_json:
         logger.info(f"  尝试使用 --active-auth-json 参数提供的路径: '{args.active_auth_json}'")
         candidate_path = os.path.expanduser(args.active_auth_json)
-        
+
         # 尝试解析路径:
         # 1. 作为绝对路径
         if os.path.isabs(candidate_path) and os.path.exists(candidate_path) and os.path.isfile(candidate_path):
@@ -790,7 +832,7 @@ if __name__ == "__main__":
                         path_in_saved = os.path.join(SAVED_AUTH_DIR, candidate_path)
                         if os.path.exists(path_in_saved) and os.path.isfile(path_in_saved):
                             effective_active_auth_json_path = path_in_saved
-        
+
         if effective_active_auth_json_path:
             logger.info(f"  将使用通过 --active-auth-json 解析的认证文件: {effective_active_auth_json_path}")
         else:
@@ -821,7 +863,7 @@ if __name__ == "__main__":
                 logger.warning(f"  扫描 '{ACTIVE_AUTH_DIR}' 时发生错误: {e_scan_active}", exc_info=True)
 
         # 处理 debug 模式的用户选择逻辑
-        if final_launch_mode == 'debug':
+        if final_launch_mode == 'debug' and not args.auto_save_auth:
             # 对于调试模式，一律扫描全目录并提示用户选择
             available_profiles = []
             # 首先扫描 ACTIVE_AUTH_DIR，然后是 SAVED_AUTH_DIR
@@ -867,19 +909,19 @@ if __name__ == "__main__":
             else:
                 logger.info("   未找到认证文件。将使用浏览器当前状态。")
                 print("   未找到认证文件。将使用浏览器当前状态。", flush=True)
-        elif not effective_active_auth_json_path:
+        elif not effective_active_auth_json_path and not args.auto_save_auth:
             # 对于无头模式，如果 --active-auth-json 未提供且 active/ 为空，则报错
             logger.error(f"  ❌ {final_launch_mode} 模式错误: --active-auth-json 未提供，且活动认证目录 '{ACTIVE_AUTH_DIR}' 中未找到任何 '.json' 认证文件。请先在调试模式下保存一个或通过参数指定。")
             sys.exit(1)
 
     # 构建 Camoufox 内部启动命令 (from dev)
     camoufox_internal_cmd_args = [
-        PYTHON_EXECUTABLE, '-u', __file__, 
+        PYTHON_EXECUTABLE, '-u', __file__,
         '--internal-launch-mode', final_launch_mode
     ]
     if effective_active_auth_json_path:
         camoufox_internal_cmd_args.extend(['--internal-auth-file', effective_active_auth_json_path])
-    
+
     camoufox_internal_cmd_args.extend(['--internal-camoufox-os', simulated_os_for_camoufox])
     camoufox_internal_cmd_args.extend(['--internal-camoufox-port', str(args.camoufox_debug_port)])
 
@@ -888,8 +930,8 @@ if __name__ == "__main__":
         camoufox_internal_cmd_args.extend(['--internal-camoufox-proxy', args.internal_camoufox_proxy])
 
     camoufox_popen_kwargs = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE, 'env': os.environ.copy()}
-    camoufox_popen_kwargs['env']['PYTHONIOENCODING'] = 'utf-8' 
-    if sys.platform != "win32" and final_launch_mode != 'debug': 
+    camoufox_popen_kwargs['env']['PYTHONIOENCODING'] = 'utf-8'
+    if sys.platform != "win32" and final_launch_mode != 'debug':
         camoufox_popen_kwargs['start_new_session'] = True
     elif sys.platform == "win32" and (final_launch_mode == 'headless' or final_launch_mode == 'virtual_headless'):
          camoufox_popen_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
@@ -899,7 +941,7 @@ if __name__ == "__main__":
         logger.info(f"  将执行 Camoufox 内部启动命令: {' '.join(camoufox_internal_cmd_args)}")
         camoufox_proc = subprocess.Popen(camoufox_internal_cmd_args, **camoufox_popen_kwargs)
         logger.info(f"  Camoufox 内部进程已启动 (PID: {camoufox_proc.pid})。正在等待 WebSocket 端点输出 (最长 {ENDPOINT_CAPTURE_TIMEOUT} 秒)...")
-        
+
         camoufox_output_q = queue.Queue()
         camoufox_stdout_reader = threading.Thread(target=_enqueue_output, args=(camoufox_proc.stdout, "stdout", camoufox_output_q, camoufox_proc.pid), daemon=True)
         camoufox_stderr_reader = threading.Thread(target=_enqueue_output, args=(camoufox_proc.stderr, "stderr", camoufox_output_q, camoufox_proc.pid), daemon=True)
@@ -914,14 +956,14 @@ if __name__ == "__main__":
                 break
             try:
                 stream_name, line_from_camoufox = camoufox_output_q.get(timeout=0.2)
-                if line_from_camoufox is None: 
+                if line_from_camoufox is None:
                     camoufox_ended_streams_count += 1
                     logger.debug(f"  [InternalCamoufox-{stream_name}-PID:{camoufox_proc.pid}] 输出流已关闭 (EOF)。")
-                    if camoufox_ended_streams_count >= 2: 
+                    if camoufox_ended_streams_count >= 2:
                         logger.info(f"  Camoufox 内部进程 (PID: {camoufox_proc.pid}) 的所有输出流均已关闭。")
                         break
                     continue
-                
+
                 log_line_content = f"[InternalCamoufox-{stream_name}-PID:{camoufox_proc.pid}]: {line_from_camoufox.rstrip()}"
                 if stream_name == "stderr" or "ERROR" in line_from_camoufox.upper() or "❌" in line_from_camoufox:
                     logger.warning(log_line_content)
@@ -932,22 +974,22 @@ if __name__ == "__main__":
                 if ws_match:
                     captured_ws_endpoint = ws_match.group(1)
                     logger.info(f"  ✅ 成功从 Camoufox 内部进程捕获到 WebSocket 端点: {captured_ws_endpoint[:40]}...")
-                    break 
+                    break
             except queue.Empty:
                 continue
-        
+
         if camoufox_stdout_reader.is_alive(): camoufox_stdout_reader.join(timeout=1.0)
         if camoufox_stderr_reader.is_alive(): camoufox_stderr_reader.join(timeout=1.0)
 
         if not captured_ws_endpoint and (camoufox_proc and camoufox_proc.poll() is None):
             logger.error(f"  ❌ 未能在 {ENDPOINT_CAPTURE_TIMEOUT} 秒内从 Camoufox 内部进程 (PID: {camoufox_proc.pid}) 捕获到 WebSocket 端点。")
             logger.error("  Camoufox 内部进程仍在运行，但未输出预期的 WebSocket 端点。请检查其日志或行为。")
-            cleanup() 
+            cleanup()
             sys.exit(1)
         elif not captured_ws_endpoint and (camoufox_proc and camoufox_proc.poll() is not None):
             logger.error(f"  ❌ Camoufox 内部进程已退出，且未能捕获到 WebSocket 端点。")
             sys.exit(1)
-        elif not captured_ws_endpoint: 
+        elif not captured_ws_endpoint:
             logger.error(f"  ❌ 未能捕获到 WebSocket 端点。")
             sys.exit(1)
 
@@ -998,10 +1040,10 @@ if __name__ == "__main__":
 
     # --- 步骤 4: 设置环境变量并准备启动 FastAPI/Uvicorn 服务器 (from dev) ---
     logger.info("--- 步骤 4: 设置环境变量并准备启动 FastAPI/Uvicorn 服务器 ---")
-    
+
     if captured_ws_endpoint:
         os.environ['CAMOUFOX_WS_ENDPOINT'] = captured_ws_endpoint
-    else: 
+    else:
         logger.error("  严重逻辑错误: WebSocket 端点未捕获，但程序仍在继续。")
         sys.exit(1)
 
@@ -1013,6 +1055,8 @@ if __name__ == "__main__":
     if effective_active_auth_json_path:
         os.environ['ACTIVE_AUTH_JSON_PATH'] = effective_active_auth_json_path
     os.environ['AUTO_SAVE_AUTH'] = str(args.auto_save_auth).lower()
+    if args.save_auth_as:
+        os.environ['SAVE_AUTH_FILENAME'] = args.save_auth_as
     os.environ['AUTH_SAVE_TIMEOUT'] = str(args.auth_save_timeout)
     os.environ['SERVER_PORT_INFO'] = str(args.server_port)
     os.environ['STREAM_PORT'] = str(args.stream_port)
@@ -1032,14 +1076,14 @@ if __name__ == "__main__":
     elif camoufox_os_param_lower == "linux": host_os_for_shortcut_env = "Linux"
     if host_os_for_shortcut_env:
         os.environ['HOST_OS_FOR_SHORTCUT'] = host_os_for_shortcut_env
-    elif 'HOST_OS_FOR_SHORTCUT' in os.environ: 
+    elif 'HOST_OS_FOR_SHORTCUT' in os.environ:
         del os.environ['HOST_OS_FOR_SHORTCUT']
-    
+
     logger.info(f"  为 server.app 设置的环境变量:")
     env_keys_to_log = [
         'CAMOUFOX_WS_ENDPOINT', 'LAUNCH_MODE', 'SERVER_LOG_LEVEL',
         'SERVER_REDIRECT_PRINT', 'DEBUG_LOGS_ENABLED', 'TRACE_LOGS_ENABLED',
-        'ACTIVE_AUTH_JSON_PATH', 'AUTO_SAVE_AUTH', 'AUTH_SAVE_TIMEOUT',
+        'ACTIVE_AUTH_JSON_PATH', 'AUTO_SAVE_AUTH', 'SAVE_AUTH_FILENAME', 'AUTH_SAVE_TIMEOUT',
         'SERVER_PORT_INFO', 'HOST_OS_FOR_SHORTCUT',
         'HELPER_ENDPOINT', 'HELPER_SAPISID', 'STREAM_PORT',
         'UNIFIED_PROXY_CONFIG'  # 新增统一代理配置
@@ -1056,18 +1100,67 @@ if __name__ == "__main__":
 
     # --- 步骤 5: 启动 FastAPI/Uvicorn 服务器 (from dev) ---
     logger.info(f"--- 步骤 5: 启动集成的 FastAPI 服务器 (监听端口: {args.server_port}) ---")
-    try:
-        uvicorn.run(
-            app,
-            host="0.0.0.0", # Bind to all interfaces
-            port=args.server_port,
-            log_config=None # server.py will handle its own logging based on env vars
-        )
-        logger.info("Uvicorn 服务器已停止。")
-    except SystemExit as e_sysexit:
-        logger.info(f"Uvicorn 或其子系统通过 sys.exit({e_sysexit.code}) 退出。")
-    except Exception as e_uvicorn:
-        logger.critical(f"❌ 运行 Uvicorn 时发生致命错误: {e_uvicorn}", exc_info=True)
-        sys.exit(1) # Ensure launcher exits if Uvicorn fails critically
-    
+
+    if not args.exit_on_auth_save:
+        try:
+            uvicorn.run(
+                app,
+                host="0.0.0.0",
+                port=args.server_port,
+                log_config=None
+            )
+            logger.info("Uvicorn 服务器已停止。")
+        except SystemExit as e_sysexit:
+            logger.info(f"Uvicorn 或其子系统通过 sys.exit({e_sysexit.code}) 退出。")
+        except Exception as e_uvicorn:
+            logger.critical(f"❌ 运行 Uvicorn 时发生致命错误: {e_uvicorn}", exc_info=True)
+            sys.exit(1)
+    else:
+        logger.info("  --exit-on-auth-save 已启用。服务器将在认证保存后自动关闭。")
+
+        server_config = uvicorn.Config(app, host="0.0.0.0", port=args.server_port, log_config=None)
+        server = uvicorn.Server(server_config)
+
+        stop_watcher = threading.Event()
+
+        def watch_for_saved_auth_and_shutdown():
+            os.makedirs(SAVED_AUTH_DIR, exist_ok=True)
+            initial_files = set(os.listdir(SAVED_AUTH_DIR))
+            logger.info(f"开始监视认证保存目录: {SAVED_AUTH_DIR}")
+
+            while not stop_watcher.is_set():
+                try:
+                    current_files = set(os.listdir(SAVED_AUTH_DIR))
+                    new_files = current_files - initial_files
+                    if new_files:
+                        logger.info(f"检测到新的已保存认证文件: {', '.join(new_files)}。将在 3 秒后触发关闭...")
+                        time.sleep(3)
+                        server.should_exit = True
+                        logger.info("已发送关闭信号给 Uvicorn 服务器。")
+                        break
+                    initial_files = current_files
+                except Exception as e:
+                    logger.error(f"监视认证目录时发生错误: {e}", exc_info=True)
+
+                if stop_watcher.wait(1):
+                    break
+            logger.info("认证文件监视线程已停止。")
+
+        watcher_thread = threading.Thread(target=watch_for_saved_auth_and_shutdown)
+
+        try:
+            watcher_thread.start()
+            server.run()
+            logger.info("Uvicorn 服务器已停止。")
+        except (KeyboardInterrupt, SystemExit) as e:
+            event_name = "KeyboardInterrupt" if isinstance(e, KeyboardInterrupt) else f"SystemExit({getattr(e, 'code', '')})"
+            logger.info(f"接收到 {event_name}，正在关闭...")
+        except Exception as e_uvicorn:
+            logger.critical(f"❌ 运行 Uvicorn 时发生致命错误: {e_uvicorn}", exc_info=True)
+            sys.exit(1)
+        finally:
+            stop_watcher.set()
+            if watcher_thread.is_alive():
+                watcher_thread.join()
+
     logger.info("🚀 Camoufox 启动器主逻辑执行完毕 🚀")

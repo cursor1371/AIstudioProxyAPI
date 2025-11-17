@@ -37,7 +37,8 @@ npm install -g pyright
 AIstudioProxyAPI/
 ├── api_utils/              # FastAPI 应用核心模块
 │   ├── app.py             # FastAPI 应用入口
-│   ├── routes.py          # API 路由定义
+│   ├── routers/           # API 路由（按职责拆分）
+│   ├── routers/           # 端点在此按职责维护（已弃用 routes.py）
 │   ├── request_processor.py # 请求处理逻辑
 │   ├── queue_worker.py    # 队列工作器
 │   └── auth_utils.py      # 认证工具
@@ -193,6 +194,21 @@ class ChatRequest(BaseModel):
     message: str
     model: Optional[str] = None
     temperature: float = 0.7
+
+## 🧭 新增端点规范（Routers）
+
+- 新增端点请在 `api_utils/routers/` 下创建对应模块，保持单一职责。
+- 在 `api_utils/routers/__init__.py` 中重导出端点，便于 `app.py` 一处集中注册。
+- 遵循错误统一：优先使用 `api_utils.error_utils` 构造 HTTPException。
+- 环境变量读取统一使用 `config.get_environment_variable`。
+
+## ❗ 错误处理规范
+
+- 499：客户端断开/取消（`client_disconnected`/`client_cancelled`）
+- 502：上游/Playwright 失败（`upstream_error`）
+- 503：服务不可用（`service_unavailable`）
+- 504：处理超时（`processing_timeout`）
+- 4xx/5xx：其余使用 `bad_request`/`server_error` 或 `http_error` 指定
 ```
 
 ## 🧪 测试

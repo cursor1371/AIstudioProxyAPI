@@ -9,7 +9,8 @@ INPUT_SELECTOR = PROMPT_TEXTAREA_SELECTOR
 INPUT_SELECTOR2 = PROMPT_TEXTAREA_SELECTOR
 
 # --- 按钮选择器 ---
-SUBMIT_BUTTON_SELECTOR = 'button[aria-label="Run"].run-button'
+# 发送按钮：优先匹配 aria-label="Run" 的按钮；如页面结构变更，可退化到容器内的提交按钮。
+SUBMIT_BUTTON_SELECTOR = 'button[aria-label="Run"].run-button, ms-run-button button[type="submit"].run-button'
 CLEAR_CHAT_BUTTON_SELECTOR = 'button[data-test-clear="outside"][aria-label="New chat"]'
 CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR = 'button.ms-button-primary:has-text("Discard and continue")'
 UPLOAD_BUTTON_SELECTOR = 'button[aria-label^="Insert assets"]'
@@ -42,8 +43,14 @@ MAT_CHIP_REMOVE_BUTTON_SELECTOR = 'mat-chip-set mat-chip-row button[aria-label*=
 TOP_P_INPUT_SELECTOR = 'ms-slider input[type="number"][max="1"]'
 TEMPERATURE_INPUT_SELECTOR = 'ms-slider input[type="number"][max="2"]'
 USE_URL_CONTEXT_SELECTOR = 'button[aria-label="Browse the url context"]'
-SET_THINKING_BUDGET_TOGGLE_SELECTOR = 'button[aria-label="Toggle thinking budget between auto and manual"]'
-# Thinking budget slider input
-THINKING_BUDGET_INPUT_SELECTOR = '//div[contains(@class, "settings-item") and .//p[normalize-space()="Set thinking budget"]]/following-sibling::div//input[@type="number"]'
+
+# --- 思考模式相关选择器 ---
+# 主思考开关：控制是否启用思考模式（总开关）
+ENABLE_THINKING_MODE_TOGGLE_SELECTOR = '[data-test-toggle="enable-thinking"] button'
+# 手动预算开关：控制是否手动限制思考预算
+SET_THINKING_BUDGET_TOGGLE_SELECTOR = '[data-test-toggle="manual-budget"] button'
+# 思考预算输入框
+THINKING_BUDGET_INPUT_SELECTOR = '[data-test-slider] input[type="number"]'
+
 # --- Google Search Grounding ---
 GROUNDING_WITH_GOOGLE_SEARCH_TOGGLE_SELECTOR = 'div[data-test-id="searchAsAToolTooltip"] mat-slide-toggle button'

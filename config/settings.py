@@ -24,6 +24,7 @@ ACTIVE_AUTH_DIR = os.path.join(AUTH_PROFILES_DIR, 'active')
 SAVED_AUTH_DIR = os.path.join(AUTH_PROFILES_DIR, 'saved')
 LOG_DIR = os.path.join(os.path.dirname(__file__), '..', 'logs')
 APP_LOG_FILE_PATH = os.path.join(LOG_DIR, 'app.log')
+UPLOAD_FILES_DIR = os.path.join(os.path.dirname(__file__), '..', 'upload_files')
 
 def get_environment_variable(key: str, default: str = '') -> str:
     """获取环境变量值"""
@@ -50,5 +51,6 @@ NO_PROXY_ENV = os.environ.get('NO_PROXY')
 
 # --- 脚本注入配置 ---
 ENABLE_SCRIPT_INJECTION = get_boolean_env('ENABLE_SCRIPT_INJECTION', True)
+ONLY_COLLECT_CURRENT_USER_ATTACHMENTS = get_boolean_env('ONLY_COLLECT_CURRENT_USER_ATTACHMENTS', False)
 USERSCRIPT_PATH = get_environment_variable('USERSCRIPT_PATH', 'browser_utils/more_modles.js')
 # 注意：MODEL_CONFIG_PATH 已废弃，现在直接从油猴脚本解析模型数据

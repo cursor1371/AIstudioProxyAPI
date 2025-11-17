@@ -29,12 +29,13 @@ def get_worker_task():
 
 def get_server_state() -> Dict[str, Any]:
     from server import is_initializing, is_playwright_ready, is_browser_connected, is_page_ready
-    return {
-        "is_initializing": is_initializing,
-        "is_playwright_ready": is_playwright_ready,
-        "is_browser_connected": is_browser_connected,
-        "is_page_ready": is_page_ready,
-    }
+    # 返回不可变快照，避免下游修改全局引用
+    return dict(
+        is_initializing=is_initializing,
+        is_playwright_ready=is_playwright_ready,
+        is_browser_connected=is_browser_connected,
+        is_page_ready=is_page_ready,
+    )
 
 def get_page_instance():
     from server import page_instance

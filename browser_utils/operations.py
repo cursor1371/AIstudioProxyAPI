@@ -12,7 +12,14 @@ from typing import Optional, Any, List, Dict, Callable, Set
 from playwright.async_api import Page as AsyncPage, Locator, Error as PlaywrightAsyncError
 
 # 导入配置和模型
-from config import *
+from config import (
+    DEBUG_LOGS_ENABLED,
+    MODELS_ENDPOINT_URL_CONTAINS,
+    ERROR_TOAST_SELECTOR,
+    CLICK_TIMEOUT_MS,
+    RESPONSE_COMPLETION_TIMEOUT,
+    INITIAL_WAIT_MS_BEFORE_POLLING,
+)
 from models import ClientDisconnectedError
 
 logger = logging.getLogger("AIStudioProxyServer")

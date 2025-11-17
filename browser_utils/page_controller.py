@@ -3,6 +3,7 @@ PageController模块
 封装了所有与Playwright页面直接交互的复杂逻辑。
 """
 import asyncio
+import re
 from typing import Callable, List, Dict, Any, Optional
 
 from playwright.async_api import Page as AsyncPage, expect as expect_async, TimeoutError
@@ -13,7 +14,7 @@ from config import (
     CLEAR_CHAT_BUTTON_SELECTOR, CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR, OVERLAY_SELECTOR,
     PROMPT_TEXTAREA_SELECTOR, RESPONSE_CONTAINER_SELECTOR, RESPONSE_TEXT_SELECTOR,
     EDIT_MESSAGE_BUTTON_SELECTOR,USE_URL_CONTEXT_SELECTOR,UPLOAD_BUTTON_SELECTOR,
-    SET_THINKING_BUDGET_TOGGLE_SELECTOR, THINKING_BUDGET_INPUT_SELECTOR,
+    ENABLE_THINKING_MODE_TOGGLE_SELECTOR, SET_THINKING_BUDGET_TOGGLE_SELECTOR, THINKING_BUDGET_INPUT_SELECTOR,
     GROUNDING_WITH_GOOGLE_SEARCH_TOGGLE_SELECTOR
 )
 from config import (
@@ -24,6 +25,7 @@ from config import (
 from models import ClientDisconnectedError
 from .operations import save_error_snapshot, _wait_for_response_completion, _get_final_response_content
 from .initialization import enable_temporary_chat_mode
+from .thinking_normalizer import normalize_reasoning_effort, format_directive_log
 
 class PageController:
     """封装了与AI Studio页面交互的所有操作。"""
@@ -79,67 +81,69 @@ class PageController:
         await self._adjust_google_search(request_params, check_client_disconnected)
 
     async def _handle_thinking_budget(self, request_params: Dict[str, Any], check_client_disconnected: Callable):
-        """处理思考预算的调整逻辑。"""
+        """处理思考模式和预算的调整逻辑。
+
+        使用归一化模块将 reasoning_effort 转换为标准指令，然后根据指令控制：
+        1. 主思考开关（总开关）
+        2. 手动预算开关
+        3. 预算值输入框
+        """
         reasoning_effort = request_params.get('reasoning_effort')
 
-        # 检查用户是否明确禁用了思考预算
-        should_disable_budget = isinstance(reasoning_effort, str) and reasoning_effort.lower() == 'none'
+        # 使用归一化模块标准化参数
+        directive = normalize_reasoning_effort(reasoning_effort)
+        self.logger.info(f"[{self.req_id}] 思考模式指令: {format_directive_log(directive)}")
 
-        if should_disable_budget:
-            self.logger.info(f"[{self.req_id}] 用户通过 reasoning_effort='none' 明确禁用思考预算。")
-            await self._control_thinking_budget_toggle(should_be_checked=False, check_client_disconnected=check_client_disconnected)
-        elif reasoning_effort is not None:
-            # 用户指定了非 'none' 的值，则开启并设置
-            self.logger.info(f"[{self.req_id}] 用户指定了 reasoning_effort: {reasoning_effort}，将启用并设置思考预算。")
-            await self._control_thinking_budget_toggle(should_be_checked=True, check_client_disconnected=check_client_disconnected)
-            await self._adjust_thinking_budget(reasoning_effort, check_client_disconnected)
-        else:
-            # 用户未指定，根据默认配置
-            self.logger.info(f"[{self.req_id}] 用户未指定 reasoning_effort，根据默认配置 ENABLE_THINKING_BUDGET: {ENABLE_THINKING_BUDGET}。")
-            await self._control_thinking_budget_toggle(should_be_checked=ENABLE_THINKING_BUDGET, check_client_disconnected=check_client_disconnected)
-            if ENABLE_THINKING_BUDGET:
-                # 如果默认开启，则使用默认值
-                await self._adjust_thinking_budget(None, check_client_disconnected)
+        # 场景1: 关闭思考模式
+        if not directive.thinking_enabled:
+            self.logger.info(f"[{self.req_id}] 尝试关闭主思考开关...")
+            success = await self._control_thinking_mode_toggle(
+                should_be_enabled=False,
+                check_client_disconnected=check_client_disconnected
+            )
 
-    def _parse_thinking_budget(self, reasoning_effort: Optional[Any]) -> Optional[int]:
-        """从 reasoning_effort 解析出 token_budget。"""
-        token_budget = None
-        if reasoning_effort is None:
-            token_budget = DEFAULT_THINKING_BUDGET
-            self.logger.info(f"[{self.req_id}] 'reasoning_effort' 为空，使用默认思考预算: {token_budget}")
-        elif isinstance(reasoning_effort, int):
-            token_budget = reasoning_effort
-        elif isinstance(reasoning_effort, str):
-            if reasoning_effort.lower() == 'none':
-                token_budget = DEFAULT_THINKING_BUDGET
-                self.logger.info(f"[{self.req_id}] 'reasoning_effort' 为 'none' 字符串，使用默认思考预算: {token_budget}")
-            else:
-                effort_map = {
-                    "low": 1000,
-                    "medium": 8000,
-                    "high": 24000
-                }
-                token_budget = effort_map.get(reasoning_effort.lower())
-                if token_budget is None:
-                    try:
-                        token_budget = int(reasoning_effort)
-                    except (ValueError, TypeError):
-                        pass # token_budget remains None
-        
-        if token_budget is None:
-             self.logger.warning(f"[{self.req_id}] 无法从 '{reasoning_effort}' (类型: {type(reasoning_effort)}) 解析出有效的 token_budget。")
-
-        return token_budget
-
-    async def _adjust_thinking_budget(self, reasoning_effort: Optional[Any], check_client_disconnected: Callable):
-        """根据 reasoning_effort 调整思考预算。"""
-        self.logger.info(f"[{self.req_id}] 检查并调整思考预算，输入值: {reasoning_effort}")
-        
-        token_budget = self._parse_thinking_budget(reasoning_effort)
-
-        if token_budget is None:
-            self.logger.warning(f"[{self.req_id}] 无效的 reasoning_effort 值: '{reasoning_effort}'。跳过调整。")
+            if not success:
+                # 降级方案：主开关不可用，尝试将预算设为 0
+                self.logger.warning(f"[{self.req_id}] 主思考开关不可用，使用降级方案：设置预算为 0")
+                await self._control_thinking_budget_toggle(
+                    should_be_checked=True,
+                    check_client_disconnected=check_client_disconnected
+                )
+                await self._set_thinking_budget_value(0, check_client_disconnected)
             return
+
+        # 场景2和3: 开启思考模式
+        self.logger.info(f"[{self.req_id}] 开启主思考开关...")
+        await self._control_thinking_mode_toggle(
+            should_be_enabled=True,
+            check_client_disconnected=check_client_disconnected
+        )
+
+        # 场景2: 开启思考，不限制预算
+        if not directive.budget_enabled:
+            self.logger.info(f"[{self.req_id}] 关闭手动预算限制...")
+            await self._control_thinking_budget_toggle(
+                should_be_checked=False,
+                check_client_disconnected=check_client_disconnected
+            )
+
+        # 场景3: 开启思考，限制预算
+        else:
+            self.logger.info(f"[{self.req_id}] 开启手动预算限制并设置预算值: {directive.budget_value} tokens")
+            await self._control_thinking_budget_toggle(
+                should_be_checked=True,
+                check_client_disconnected=check_client_disconnected
+            )
+            await self._set_thinking_budget_value(directive.budget_value, check_client_disconnected)
+
+    async def _set_thinking_budget_value(self, token_budget: int, check_client_disconnected: Callable):
+        """设置思考预算的具体数值。
+
+        参数:
+            token_budget: 预算token数量（由归一化模块计算得出）
+            check_client_disconnected: 客户端断连检查回调
+        """
+        self.logger.info(f"[{self.req_id}] 设置思考预算值: {token_budget} tokens")
 
         budget_input_locator = self.page.locator(THINKING_BUDGET_INPUT_SELECTOR)
         
@@ -265,9 +269,71 @@ class PageController:
             if isinstance(e, ClientDisconnectedError):
                 raise
 
+    async def _control_thinking_mode_toggle(self, should_be_enabled: bool, check_client_disconnected: Callable) -> bool:
+        """
+        控制主思考开关（总开关），决定是否启用思考模式。
+
+        参数:
+            should_be_enabled: 期望的开关状态（True=开启, False=关闭）
+            check_client_disconnected: 客户端断开检测函数
+
+        返回:
+            bool: 是否成功设置到期望状态（如果开关不存在或被禁用，返回False）
+        """
+        toggle_selector = ENABLE_THINKING_MODE_TOGGLE_SELECTOR
+        self.logger.info(f"[{self.req_id}] 控制主思考开关，期望状态: {'开启' if should_be_enabled else '关闭'}...")
+
+        try:
+            toggle_locator = self.page.locator(toggle_selector)
+
+            # 等待元素可见（5秒超时）
+            await expect_async(toggle_locator).to_be_visible(timeout=5000)
+            await self._check_disconnect(check_client_disconnected, "主思考开关 - 元素可见后")
+
+            # 检查当前状态
+            is_checked_str = await toggle_locator.get_attribute("aria-checked")
+            current_state_is_enabled = is_checked_str == "true"
+            self.logger.info(f"[{self.req_id}] 主思考开关当前状态: {is_checked_str} (是否开启: {current_state_is_enabled})")
+
+            # 如果当前状态与期望状态不同，点击切换
+            if current_state_is_enabled != should_be_enabled:
+                action = "开启" if should_be_enabled else "关闭"
+                self.logger.info(f"[{self.req_id}] 主思考开关需要切换，正在点击以{action}思考模式...")
+
+                await toggle_locator.click(timeout=CLICK_TIMEOUT_MS)
+                await self._check_disconnect(check_client_disconnected, f"主思考开关 - 点击{action}后")
+
+                # 等待状态更新
+                await asyncio.sleep(0.5)
+
+                # 验证新状态
+                new_state_str = await toggle_locator.get_attribute("aria-checked")
+                new_state_is_enabled = new_state_str == "true"
+
+                if new_state_is_enabled == should_be_enabled:
+                    self.logger.info(f"[{self.req_id}] ✅ 主思考开关已成功{action}。新状态: {new_state_str}")
+                    return True
+                else:
+                    self.logger.warning(f"[{self.req_id}] ⚠️ 主思考开关{action}后验证失败。期望: {should_be_enabled}, 实际: {new_state_str}")
+                    return False
+            else:
+                self.logger.info(f"[{self.req_id}] 主思考开关已处于期望状态，无需操作。")
+                return True
+
+        except TimeoutError:
+            self.logger.warning(f"[{self.req_id}] ⚠️ 主思考开关元素未找到或不可见（当前模型可能不支持思考模式）")
+            return False
+        except Exception as e:
+            self.logger.error(f"[{self.req_id}] ❌ 操作主思考开关时发生错误: {e}")
+            await save_error_snapshot(f"thinking_mode_toggle_error_{self.req_id}")
+            if isinstance(e, ClientDisconnectedError):
+                raise
+            return False
+
     async def _control_thinking_budget_toggle(self, should_be_checked: bool, check_client_disconnected: Callable):
         """
         根据 should_be_checked 的值，控制 "Thinking Budget" 滑块开关的状态。
+        （手动预算开关，控制是否限制思考预算）
         """
         toggle_selector = SET_THINKING_BUDGET_TOGGLE_SELECTOR
         self.logger.info(f"[{self.req_id}] 控制 'Thinking Budget' 开关，期望状态: {'选中' if should_be_checked else '未选中'}...")
@@ -603,7 +669,25 @@ class PageController:
             await confirm_button_locator.click(timeout=CLICK_TIMEOUT_MS)
         else:
             self.logger.info(f"[{self.req_id}] 点击\"清空聊天\"按钮: {CLEAR_CHAT_BUTTON_SELECTOR}")
-            await clear_chat_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+            # 若存在透明遮罩层拦截指针事件，先尝试清理
+            try:
+                await self._dismiss_backdrops()
+            except Exception:
+                pass
+            try:
+                await clear_chat_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+            except Exception as first_click_err:
+                # 尝试再次清理遮罩，并使用 force 点击作为兜底
+                self.logger.warning(f"[{self.req_id}] 清空按钮第一次点击失败，尝试清理遮罩并强制点击: {first_click_err}")
+                try:
+                    await self._dismiss_backdrops()
+                except Exception:
+                    pass
+                try:
+                    await clear_chat_button_locator.click(timeout=CLICK_TIMEOUT_MS, force=True)
+                except Exception as force_click_err:
+                    self.logger.error(f"[{self.req_id}] 清空按钮强制点击仍失败: {force_click_err}")
+                    raise
             await self._check_disconnect(check_client_disconnected, "清空聊天 - 点击\"清空聊天\"后")
 
             try:
@@ -655,6 +739,28 @@ class PageController:
 
             await self._check_disconnect(check_client_disconnected, f"清空聊天 - 消失检查尝试 {attempt_disappear + 1} 后")
 
+    async def _dismiss_backdrops(self):
+        """尝试关闭可能残留的 cdk 透明遮罩层以避免点击被拦截。"""
+        try:
+            backdrop = self.page.locator('div.cdk-overlay-backdrop.cdk-overlay-backdrop-showing, div.cdk-overlay-backdrop.cdk-overlay-transparent-backdrop.cdk-overlay-backdrop-showing')
+            for i in range(3):
+                cnt = 0
+                try:
+                    cnt = await backdrop.count()
+                except Exception:
+                    cnt = 0
+                if cnt and cnt > 0:
+                    self.logger.info(f"[{self.req_id}] 检测到透明遮罩层 ({cnt})，发送 ESC 以关闭 (尝试 {i+1}/3)。")
+                    try:
+                        await self.page.keyboard.press('Escape')
+                        await asyncio.sleep(0.2)
+                    except Exception:
+                        pass
+                else:
+                    break
+        except Exception:
+            pass
+
     async def _verify_chat_cleared(self, check_client_disconnected: Callable):
         """验证聊天已清空"""
         last_response_container = self.page.locator(RESPONSE_CONTAINER_SELECTOR).last
@@ -666,6 +772,151 @@ class PageController:
         except Exception as verify_err:
             self.logger.warning(f"[{self.req_id}] ⚠️ 警告: 清空聊天验证失败 (最后响应容器未隐藏): {verify_err}")
     
+    # 已移除直接设置 <input type=file> 的上传路径，统一采用菜单上传方式
+
+    async def _handle_post_upload_dialog(self):
+        """处理上传后可能出现的授权/版权确认对话框，优先点击同意类按钮，不主动关闭重要对话框。"""
+        try:
+            overlay_container = self.page.locator('div.cdk-overlay-container')
+            if await overlay_container.count() == 0:
+                return
+
+            # 候选同意按钮的文本/属性
+            agree_texts = [
+                'Agree', 'I agree', 'Allow', 'Continue', 'OK',
+                '确定', '同意', '继续', '允许'
+            ]
+            # 统一在 overlay 容器内查找可见按钮
+            for text in agree_texts:
+                try:
+                    btn = overlay_container.locator(f"button:has-text('{text}')")
+                    if await btn.count() > 0 and await btn.first.is_visible(timeout=300):
+                        await btn.first.click()
+                        self.logger.info(f"[{self.req_id}] 上传后对话框: 点击按钮 '{text}'。")
+                        await asyncio.sleep(0.3)
+                        break
+                except Exception:
+                    continue
+            # 若存在带 aria-label 的版权按钮
+            try:
+                acknow_btn_locator = self.page.locator('button[aria-label*="copyright" i], button[aria-label*="acknowledge" i]')
+                if await acknow_btn_locator.count() > 0 and await acknow_btn_locator.first.is_visible(timeout=300):
+                    await acknow_btn_locator.first.click()
+                    self.logger.info(f"[{self.req_id}] 上传后对话框: 点击版权确认按钮 (aria-label 匹配)。")
+                    await asyncio.sleep(0.3)
+            except Exception:
+                pass
+
+            # 等待遮罩层消失（尽量不强制 ESC，避免意外取消）
+            try:
+                overlay_backdrop = self.page.locator('div.cdk-overlay-backdrop.cdk-overlay-backdrop-showing')
+                if await overlay_backdrop.count() > 0:
+                    try:
+                        await expect_async(overlay_backdrop).to_be_hidden(timeout=3000)
+                        self.logger.info(f"[{self.req_id}] 上传后对话框遮罩层已隐藏。")
+                    except Exception:
+                        self.logger.warning(f"[{self.req_id}] 上传后对话框遮罩层仍存在，后续提交可能被拦截。")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    async def _ensure_files_attached(self, wrapper_locator, expected_min: int = 1, timeout_ms: int = 5000) -> bool:
+        """轮询检查输入区域内 file input 的 files 是否 >= 期望数量。"""
+        end = asyncio.get_event_loop().time() + (timeout_ms / 1000)
+        while asyncio.get_event_loop().time() < end:
+            try:
+                # NOTE: normalize JS eval string to avoid parser confusion
+                counts = await wrapper_locator.evaluate("""
+                    (el) => {
+                      const result = {inputs:0, chips:0, blobs:0};
+                      try { el.querySelectorAll('input[type="file"]').forEach(i => { result.inputs += (i.files ? i.files.length : 0); }); } catch(e){}
+                      try { result.chips = el.querySelectorAll('button[aria-label*="Remove" i], button[aria-label*="asset" i]').length; } catch(e){}
+                      try { result.blobs = el.querySelectorAll('img[src^="blob:"], video[src^="blob:"]').length; } catch(e){}
+                      return result;
+                    }
+                    """)
+
+                total = 0
+                if isinstance(counts, dict):
+                    total = max(int(counts.get('inputs') or 0), int(counts.get('chips') or 0), int(counts.get('blobs') or 0))
+                if total >= expected_min:
+                    self.logger.info(f"[{self.req_id}] 已检测到已附加文件: inputs={counts.get('inputs')}, chips={counts.get('chips')}, blobs={counts.get('blobs')} (>= {expected_min})")
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.2)
+        self.logger.warning(f"[{self.req_id}] 未能在超时内检测到已附加文件 (期望 >= {expected_min})")
+        return False
+
+    async def _open_upload_menu_and_choose_file(self, files_list: List[str]) -> bool:
+        """通过'Insert assets'菜单选择'上传/Upload'项并打开文件选择器设置文件。"""
+        try:
+            # 若上一次菜单/对话的透明遮罩仍在，先尝试关闭
+            try:
+                tb = self.page.locator('div.cdk-overlay-backdrop.cdk-overlay-transparent-backdrop.cdk-overlay-backdrop-showing')
+                if await tb.count() > 0 and await tb.first.is_visible(timeout=300):
+                    await self.page.keyboard.press('Escape')
+                    await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
+            trigger = self.page.locator('button[aria-label="Insert assets such as images, videos, files, or audio"]')
+            await trigger.click()
+            menu_container = self.page.locator('div.cdk-overlay-container')
+            # 等待菜单显示
+            try:
+                await expect_async(menu_container.locator("div[role='menu']").first).to_be_visible(timeout=3000)
+            except Exception:
+                # 再尝试一次触发
+                try:
+                    await trigger.click()
+                    await expect_async(menu_container.locator("div[role='menu']").first).to_be_visible(timeout=3000)
+                except Exception:
+                    self.logger.warning(f"[{self.req_id}] 未能显示上传菜单面板。")
+                    return False
+
+            # 仅使用 aria-label='Upload File' 的菜单项
+            try:
+                upload_btn = menu_container.locator("div[role='menu'] button[role='menuitem'][aria-label='Upload File']")
+                if await upload_btn.count() == 0:
+                    # 退化到按文本匹配 Upload File
+                    upload_btn = menu_container.locator("div[role='menu'] button[role='menuitem']:has-text('Upload File')")
+                if await upload_btn.count() == 0:
+                    self.logger.warning(f"[{self.req_id}] 未找到 'Upload File' 菜单项。")
+                    return False
+                btn = upload_btn.first
+                await expect_async(btn).to_be_visible(timeout=2000)
+                # 优先使用内部隐藏 input[type=file]
+                input_loc = btn.locator('input[type="file"]')
+                if await input_loc.count() > 0:
+                    await input_loc.set_input_files(files_list)
+                    self.logger.info(f"[{self.req_id}] ✅ 通过菜单项(Upload File) 隐藏 input 设置文件成功: {len(files_list)} 个")
+                else:
+                    # 回退为原生文件选择器
+                    async with self.page.expect_file_chooser() as fc_info:
+                        await btn.click()
+                    file_chooser = await fc_info.value
+                    await file_chooser.set_files(files_list)
+                    self.logger.info(f"[{self.req_id}] ✅ 通过文件选择器设置文件成功: {len(files_list)} 个")
+            except Exception as e_set:
+                self.logger.error(f"[{self.req_id}] 设置文件失败: {e_set}")
+                return False
+            # 关闭可能残留的菜单遮罩
+            try:
+                backdrop = self.page.locator('div.cdk-overlay-backdrop.cdk-overlay-backdrop-showing, div.cdk-overlay-backdrop.cdk-overlay-transparent-backdrop.cdk-overlay-backdrop-showing')
+                if await backdrop.count() > 0:
+                    await self.page.keyboard.press('Escape')
+                    await asyncio.sleep(0.2)
+            except Exception:
+                pass
+            # 处理可能的授权弹窗
+            await self._handle_post_upload_dialog()
+            return True
+        except Exception as e:
+            self.logger.error(f"[{self.req_id}] 通过上传菜单设置文件失败: {e}")
+            return False
+
     async def submit_prompt(self, prompt: str,image_list: List, check_client_disconnected: Callable):
         """提交提示到页面。"""
         self.logger.info(f"[{self.req_id}] 填充并提交提示 ({len(prompt)} chars)...")
@@ -691,36 +942,15 @@ class PageController:
             await autosize_wrapper_locator.evaluate('(element, text) => { element.setAttribute("data-value", text); }', prompt)
             await self._check_disconnect(check_client_disconnected, "After Input Fill")
 
-            # 上传
+            # 上传（仅使用菜单 + 隐藏 input 设置文件；处理可能的授权弹窗）
+            try:
+                self.logger.info(f"[{self.req_id}] 待上传附件数量: {len(image_list)}")
+            except Exception:
+                pass
             if len(image_list) > 0:
-                try:
-                    # 1. 监听文件选择器
-                    #    page.expect_file_chooser() 会返回一个上下文管理器
-                    #    当文件选择器出现时，它会得到 FileChooser 对象
-                    function_btn_localtor = self.page.locator('button[aria-label="Insert assets such as images, videos, files, or audio"]')
-                    await function_btn_localtor.click()
-                    #asyncio.sleep(0.5)
-                    async with self.page.expect_file_chooser() as fc_info:
-                        # 2. 点击那个会触发文件选择的普通按钮
-                        upload_btn_localtor = self.page.locator(UPLOAD_BUTTON_SELECTOR)
-                        await upload_btn_localtor.click()
-                        print("点击了 JS 上传按钮，等待文件选择器...")
-
-                    # 3. 获取文件选择器对象
-                    file_chooser = await fc_info.value
-                    print("文件选择器已出现。")
-
-                    # 4. 设置要上传的文件
-                    await file_chooser.set_files(image_list)
-                    print(f"已将 '{image_list}' 设置到文件选择器。")
-
-                    #asyncio.sleep(0.2)
-                    acknow_btn_locator = self.page.locator('button[aria-label="Agree to the copyright acknowledgement"]')
-                    if await acknow_btn_locator.count() > 0:
-                        await acknow_btn_locator.click()
-
-                except Exception as e:
-                    print(f"在上传文件时发生错误: {e}")
+                ok = await self._open_upload_menu_and_choose_file(image_list)
+                if not ok:
+                    self.logger.error(f"[{self.req_id}] 在上传文件时发生错误: 通过菜单方式未能设置文件")
 
             # 等待发送按钮启用
             wait_timeout_ms_submit_enabled = 100000
@@ -736,19 +966,28 @@ class PageController:
             await self._check_disconnect(check_client_disconnected, "After Submit Button Enabled")
             await asyncio.sleep(0.3)
 
-            # 尝试使用快捷键提交
-            submitted_successfully = await self._try_shortcut_submit(prompt_textarea_locator, check_client_disconnected)
+            # 优先点击按钮提交，其次回车提交，最后组合键提交
+            button_clicked = False
+            try:
+                self.logger.info(f"[{self.req_id}] 尝试点击提交按钮...")
+                # 提交前再处理一次潜在对话框，避免按钮点击被拦截
+                await self._handle_post_upload_dialog()
+                await submit_button_locator.click(timeout=5000)
+                self.logger.info(f"[{self.req_id}] ✅ 提交按钮点击完成。")
+                button_clicked = True
+            except Exception as click_err:
+                self.logger.error(f"[{self.req_id}] ❌ 提交按钮点击失败: {click_err}")
+                await save_error_snapshot(f"submit_button_click_fail_{self.req_id}")
 
-            # 如果快捷键失败，使用按钮点击
-            if not submitted_successfully:
-                self.logger.info(f"[{self.req_id}] 快捷键提交失败，尝试点击提交按钮...")
-                try:
-                    await submit_button_locator.click(timeout=5000)
-                    self.logger.info(f"[{self.req_id}] ✅ 提交按钮点击完成。")
-                except Exception as click_err:
-                    self.logger.error(f"[{self.req_id}] ❌ 提交按钮点击失败: {click_err}")
-                    await save_error_snapshot(f"submit_button_click_fail_{self.req_id}")
-                    raise
+            if not button_clicked:
+                self.logger.info(f"[{self.req_id}] 按钮提交失败，尝试回车键提交...")
+                submitted_successfully = await self._try_enter_submit(prompt_textarea_locator, check_client_disconnected)
+                if not submitted_successfully:
+                    self.logger.info(f"[{self.req_id}] 回车提交失败，尝试组合键提交...")
+                    combo_ok = await self._try_combo_submit(prompt_textarea_locator, check_client_disconnected)
+                    if not combo_ok:
+                        self.logger.error(f"[{self.req_id}] ❌ 组合键提交也失败。")
+                        raise Exception("Submit failed: Button, Enter, and Combo key all failed")
 
             await self._check_disconnect(check_client_disconnected, "After Submit")
 
@@ -758,8 +997,106 @@ class PageController:
                 await save_error_snapshot(f"input_submit_error_{self.req_id}")
             raise
 
-    async def _try_shortcut_submit(self, prompt_textarea_locator, check_client_disconnected: Callable) -> bool:
-        """尝试使用快捷键提交"""
+    async def _simulate_drag_drop_files(self, target_locator, files_list: List[str]) -> None:
+        """将本地文件以拖放事件的方式注入到目标元素。
+        仅负责触发 dragenter/dragover/drop，不在此处做附加验证以节省时间。
+        """
+        payloads = []
+        for path in files_list:
+            try:
+                with open(path, 'rb') as f:
+                    raw = f.read()
+                b64 = base64.b64encode(raw).decode('ascii')
+                mime, _ = mimetypes.guess_type(path)
+                payloads.append({
+                    'name': path.split('/')[-1],
+                    'mime': mime or 'application/octet-stream',
+                    'b64': b64,
+                })
+            except Exception as e:
+                self.logger.warning(f"[{self.req_id}] 读取文件失败，跳过拖放: {path} - {e}")
+
+        if not payloads:
+            raise Exception("无可用文件用于拖放")
+
+        candidates = [
+            target_locator,
+            self.page.locator('ms-prompt-input-wrapper ms-autosize-textarea textarea'),
+            self.page.locator('ms-prompt-input-wrapper ms-autosize-textarea'),
+            self.page.locator('ms-prompt-input-wrapper'),
+        ]
+
+        last_err = None
+        for idx, cand in enumerate(candidates):
+            try:
+                await expect_async(cand).to_be_visible(timeout=3000)
+                await cand.evaluate(
+                    """
+                    (el, files) => {
+                      const dt = new DataTransfer();
+                      for (const p of files) {
+                        const bstr = atob(p.b64);
+                        const len = bstr.length;
+                        const u8 = new Uint8Array(len);
+                        for (let i = 0; i < len; i++) u8[i] = bstr.charCodeAt(i);
+                        const blob = new Blob([u8], { type: p.mime || 'application/octet-stream' });
+                        const file = new File([blob], p.name, { type: p.mime || 'application/octet-stream' });
+                        dt.items.add(file);
+                      }
+                      const evEnter = new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt });
+                      el.dispatchEvent(evEnter);
+                      const evOver = new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt });
+                      el.dispatchEvent(evOver);
+                      const evDrop = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt });
+                      el.dispatchEvent(evDrop);
+                    }
+                    """,
+                    payloads
+                )
+                await asyncio.sleep(0.5)
+                self.logger.info(f"[{self.req_id}] 拖放事件已在候选目标 {idx+1}/{len(candidates)} 上触发。")
+                return
+            except Exception as e_try:
+                last_err = e_try
+                continue
+
+        # 兜底：在 document.body 上尝试一次
+        try:
+            await self.page.evaluate(
+                """
+                (files) => {
+                  const dt = new DataTransfer();
+                  for (const p of files) {
+                    const bstr = atob(p.b64);
+                    const len = bstr.length;
+                    const u8 = new Uint8Array(len);
+                    for (let i = 0; i < len; i++) u8[i] = bstr.charCodeAt(i);
+                    const blob = new Blob([u8], { type: p.mime || 'application/octet-stream' });
+                    const file = new File([blob], p.name, { type: p.mime || 'application/octet-stream' });
+                    dt.items.add(file);
+                  }
+                  const el = document.body;
+                  const evEnter = new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt });
+                  el.dispatchEvent(evEnter);
+                  const evOver = new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt });
+                  el.dispatchEvent(evOver);
+                  const evDrop = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt });
+                  el.dispatchEvent(evDrop);
+                }
+                """,
+                payloads
+            )
+            await asyncio.sleep(0.5)
+            self.logger.info(f"[{self.req_id}] 拖放事件已在 document.body 上触发（兜底）。")
+            return
+        except Exception:
+            pass
+
+        raise last_err or Exception("拖放未能在任何候选目标上触发")
+
+
+    async def _try_enter_submit(self, prompt_textarea_locator, check_client_disconnected: Callable) -> bool:
+        """优先使用回车键提交。"""
         import os
         try:
             # 检测操作系统
@@ -787,8 +1124,6 @@ class PageController:
             shortcut_modifier = "Meta" if is_mac_determined else "Control"
             shortcut_key = "Enter"
 
-            self.logger.info(f"[{self.req_id}] 使用快捷键: {shortcut_modifier}+{shortcut_key}")
-
             await prompt_textarea_locator.focus(timeout=5000)
             await self._check_disconnect(check_client_disconnected, "After Input Focus")
             await asyncio.sleep(0.1)
@@ -801,29 +1136,26 @@ class PageController:
                 # 如果无法获取原始内容，仍然尝试提交
                 pass
 
+            # 尝试回车键提交
+            self.logger.info(f"[{self.req_id}] 尝试回车键提交")
             try:
-                await self.page.keyboard.press(f'{shortcut_modifier}+{shortcut_key}')
+                await self.page.keyboard.press('Enter')
             except Exception:
-                # 尝试分步按键
-                await self.page.keyboard.down(shortcut_modifier)
-                await asyncio.sleep(0.05)
-                await self.page.keyboard.press(shortcut_key)
-                await asyncio.sleep(0.05)
-                await self.page.keyboard.up(shortcut_modifier)
+                try:
+                    await prompt_textarea_locator.press('Enter')
+                except Exception:
+                    pass
 
-            await self._check_disconnect(check_client_disconnected, "After Shortcut Press")
-
-            # 等待更长时间让提交完成
+            await self._check_disconnect(check_client_disconnected, "After Enter Press")
             await asyncio.sleep(2.0)
 
-            # 多种方式验证提交是否成功
+            # 验证提交是否成功
             submission_success = False
-
             try:
                 # 方法1: 检查原始输入框是否清空
                 current_content = await prompt_textarea_locator.input_value(timeout=2000) or ""
                 if original_content and not current_content.strip():
-                    self.logger.info(f"[{self.req_id}] 验证方法1: 输入框已清空，快捷键提交成功")
+                    self.logger.info(f"[{self.req_id}] 验证方法1: 输入框已清空，回车键提交成功")
                     submission_success = True
 
                 # 方法2: 检查提交按钮状态
@@ -832,7 +1164,7 @@ class PageController:
                     try:
                         is_disabled = await submit_button_locator.is_disabled(timeout=2000)
                         if is_disabled:
-                            self.logger.info(f"[{self.req_id}] 验证方法2: 提交按钮已禁用，快捷键提交成功")
+                            self.logger.info(f"[{self.req_id}] 验证方法2: 提交按钮已禁用，回车键提交成功")
                             submission_success = True
                     except Exception:
                         pass
@@ -846,25 +1178,115 @@ class PageController:
                             # 检查最后一个容器是否是新的
                             last_container = response_container.last
                             if await last_container.is_visible(timeout=1000):
-                                self.logger.info(f"[{self.req_id}] 验证方法3: 检测到响应容器，快捷键提交成功")
+                                self.logger.info(f"[{self.req_id}] 验证方法3: 检测到响应容器，回车键提交成功")
                                 submission_success = True
                     except Exception:
                         pass
-
             except Exception as verify_err:
-                self.logger.warning(f"[{self.req_id}] 快捷键提交验证过程出错: {verify_err}")
+                self.logger.warning(f"[{self.req_id}] 回车键提交验证过程出错: {verify_err}")
                 # 出错时假定提交成功，让后续流程继续
                 submission_success = True
 
             if submission_success:
-                self.logger.info(f"[{self.req_id}] ✅ 快捷键提交成功")
+                self.logger.info(f"[{self.req_id}] ✅ 回车键提交成功")
                 return True
             else:
-                self.logger.warning(f"[{self.req_id}] ⚠️ 快捷键提交验证失败")
+                self.logger.warning(f"[{self.req_id}] ⚠️ 回车键提交验证失败")
                 return False
-
         except Exception as shortcut_err:
-            self.logger.warning(f"[{self.req_id}] 快捷键提交失败: {shortcut_err}")
+            self.logger.warning(f"[{self.req_id}] 回车键提交失败: {shortcut_err}")
+            return False
+
+    async def _try_combo_submit(self, prompt_textarea_locator, check_client_disconnected: Callable) -> bool:
+        """尝试使用组合键提交 (Meta/Control + Enter)。"""
+        import os
+        try:
+            host_os_from_launcher = os.environ.get('HOST_OS_FOR_SHORTCUT')
+            is_mac_determined = False
+            if host_os_from_launcher == "Darwin":
+                is_mac_determined = True
+            elif host_os_from_launcher in ["Windows", "Linux"]:
+                is_mac_determined = False
+            else:
+                try:
+                    user_agent_data_platform = await self.page.evaluate("() => navigator.userAgentData?.platform || ''")
+                except Exception:
+                    user_agent_string = await self.page.evaluate("() => navigator.userAgent || ''")
+                    user_agent_string_lower = user_agent_string.lower()
+                    if "macintosh" in user_agent_string_lower or "mac os x" in user_agent_string_lower:
+                        user_agent_data_platform = "macOS"
+                    else:
+                        user_agent_data_platform = "Other"
+                is_mac_determined = "mac" in user_agent_data_platform.lower()
+
+            shortcut_modifier = "Meta" if is_mac_determined else "Control"
+            shortcut_key = "Enter"
+
+            await prompt_textarea_locator.focus(timeout=5000)
+            await self._check_disconnect(check_client_disconnected, "After Input Focus")
+            await asyncio.sleep(0.1)
+
+            # 记录提交前的输入框内容，用于验证
+            original_content = ""
+            try:
+                original_content = await prompt_textarea_locator.input_value(timeout=2000) or ""
+            except Exception:
+                pass
+
+            self.logger.info(f"[{self.req_id}] 尝试组合键提交: {shortcut_modifier}+{shortcut_key}")
+            try:
+                await self.page.keyboard.press(f'{shortcut_modifier}+{shortcut_key}')
+            except Exception:
+                try:
+                    await self.page.keyboard.down(shortcut_modifier)
+                    await asyncio.sleep(0.05)
+                    await self.page.keyboard.press(shortcut_key)
+                    await asyncio.sleep(0.05)
+                    await self.page.keyboard.up(shortcut_modifier)
+                except Exception:
+                    pass
+
+            await self._check_disconnect(check_client_disconnected, "After Combo Press")
+            await asyncio.sleep(2.0)
+
+            submission_success = False
+            try:
+                current_content = await prompt_textarea_locator.input_value(timeout=2000) or ""
+                if original_content and not current_content.strip():
+                    self.logger.info(f"[{self.req_id}] 验证方法1: 输入框已清空，组合键提交成功")
+                    submission_success = True
+                if not submission_success:
+                    submit_button_locator = self.page.locator(SUBMIT_BUTTON_SELECTOR)
+                    try:
+                        is_disabled = await submit_button_locator.is_disabled(timeout=2000)
+                        if is_disabled:
+                            self.logger.info(f"[{self.req_id}] 验证方法2: 提交按钮已禁用，组合键提交成功")
+                            submission_success = True
+                    except Exception:
+                        pass
+                if not submission_success:
+                    try:
+                        response_container = self.page.locator(RESPONSE_CONTAINER_SELECTOR)
+                        container_count = await response_container.count()
+                        if container_count > 0:
+                            last_container = response_container.last
+                            if await last_container.is_visible(timeout=1000):
+                                self.logger.info(f"[{self.req_id}] 验证方法3: 检测到响应容器，组合键提交成功")
+                                submission_success = True
+                    except Exception:
+                        pass
+            except Exception as verify_err:
+                self.logger.warning(f"[{self.req_id}] 组合键提交验证过程出错: {verify_err}")
+                submission_success = True
+
+            if submission_success:
+                self.logger.info(f"[{self.req_id}] ✅ 组合键提交成功")
+                return True
+            else:
+                self.logger.warning(f"[{self.req_id}] ⚠️ 组合键提交验证失败")
+                return False
+        except Exception as combo_err:
+            self.logger.warning(f"[{self.req_id}] 组合键提交失败: {combo_err}")
             return False
 
     async def get_response(self, check_client_disconnected: Callable) -> str:

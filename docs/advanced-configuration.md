@@ -354,3 +354,59 @@ API 请求中的模型参数（如 `temperature`, `max_output_tokens`, `top_p`, 
 - [脚本注入指南](script_injection_guide.md) - 详细的脚本注入功能使用说明
 - [日志控制指南](logging-control.md)
 - [故障排除指南](troubleshooting.md)
+## Toolcall / MCP 兼容使用说明（OpenAI Completions 协议）
+
+- 请求结构需遵循 OpenAI Completions 兼容格式：
+  - `messages`: 标准消息数组，含 `role` 与 `content`
+  - `tools`: 工具声明数组，元素形如 `{ "type": "function", "function": { "name": "sum", "parameters": { ... } } }`
+  - `tool_choice`: 可为具体函数名或 `{ "type": "function", "function": { "name": "sum" } }`；当为 `"auto"` 且仅声明一个工具时自动执行
+- 工具执行行为：
+  - 内置工具（`get_current_time`, `echo`, `sum`）直接执行；结果以 JSON 字符串注入
+  - 非内置但在本次请求 `tools` 中声明的工具，若提供 MCP 端点（请求字段 `mcp_endpoint` 或环境变量 `MCP_HTTP_ENDPOINT`），则调用 MCP 服务并返回结果
+  - 未声明或端点缺失时返回 `Unknown tool`
+- 响应兼容：
+  - 流式与非流式均输出 OpenAI 兼容的 `tool_calls` 结构与 `finish_reason: "tool_calls"`；最终包含 `usage` 统计和 `[DONE]`
+
+### 请求示例（Python requests）
+
+```python
+import requests
+
+API_URL = "http://localhost:2048/v1/chat/completions"
+
+data = {
+  "model": "AI-Studio_Proxy_API",
+  "stream": True,
+  "messages": [
+    {"role": "user", "content": "请计算这组数的和: {\"values\": [1, 2.5, 3]}"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "sum",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "values": {"type": "array", "items": {"type": "number"}}
+          },
+          "required": ["values"]
+        }
+      }
+    }
+  ],
+  "tool_choice": {"type": "function", "function": {"name": "sum"}},
+  # 可选：本次请求的 MCP 端点（非内置工具时启用）
+  # "mcp_endpoint": "http://127.0.0.1:7000"
+}
+
+resp = requests.post(API_URL, json=data, stream=data["stream"])
+for line in resp.iter_lines():
+  if not line:
+    continue
+  print(line.decode("utf-8"))
+```
+
+### 行为说明
+- 当工具执行发生时，响应中会包含 `tool_calls` 片段与 `finish_reason: "tool_calls"`；客户端需按 OpenAI Completions 的解析方式处理。
+- 若声明非内置工具且提供 `mcp_endpoint`（或设置环境 `MCP_HTTP_ENDPOINT`），服务器会将调用转发到 MCP 服务并返回其结果。

@@ -8,8 +8,8 @@ from .app import (
     create_app
 )
 
-# 路由处理器
-from .routes import (
+# 路由处理器（改为从 routers 聚合导入）
+from .routers import (
     read_index,
     get_css,
     get_js,

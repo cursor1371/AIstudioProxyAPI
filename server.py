@@ -34,7 +34,9 @@ import stream
 import queue
 
 # --- 配置模块导入 ---
-from config import *
+from config import (
+    RESPONSE_COMPLETION_TIMEOUT,
+)
 
 # --- models模块导入 ---
 from models import (
