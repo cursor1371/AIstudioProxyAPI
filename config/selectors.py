@@ -1,5 +1,3 @@
-# config/selectors.py
-
 """
 CSS选择器配置模块
 包含所有用于页面元素定位的CSS选择器
@@ -11,6 +9,7 @@ INPUT_SELECTOR = PROMPT_TEXTAREA_SELECTOR
 INPUT_SELECTOR2 = PROMPT_TEXTAREA_SELECTOR
 
 # --- 按钮选择器 ---
+# 发送按钮：优先匹配 aria-label="Run" 的按钮；如页面结构变更，可退化到容器内的提交按钮。
 SUBMIT_BUTTON_SELECTOR = 'button[aria-label="Run"].run-button, ms-run-button button[type="submit"].run-button'
 CLEAR_CHAT_BUTTON_SELECTOR = 'button[data-test-clear="outside"][aria-label="New chat"]'
 CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR = 'button.ms-button-primary:has-text("Discard and continue")'
@@ -45,24 +44,13 @@ TOP_P_INPUT_SELECTOR = 'ms-slider input[type="number"][max="1"]'
 TEMPERATURE_INPUT_SELECTOR = 'ms-slider input[type="number"][max="2"]'
 USE_URL_CONTEXT_SELECTOR = 'button[aria-label="Browse the url context"]'
 
-# ==================================================================================
-# vvvvvvvvvvvvvvvvvvvv   核心修正区域：思考模式选择器 v2.0   vvvvvvvvvvvvvvvvvvvvvv
-# ==================================================================================
-
-# --- 思考模式相关选择器 (已更新为基于父容器和标签文本的健壮定位方式) ---
-# 主思考开关：定位包含"Thinking mode"文本的设置项，然后在其内部寻找mat-slide-toggle。
-ENABLE_THINKING_MODE_TOGGLE_SELECTOR = 'div.settings-item:has-text("Thinking mode") mat-slide-toggle'
-
-# 手动预算开关：定位包含"Set thinking budget"文本的设置项，然后在其内部寻找mat-slide-toggle。
-SET_THINKING_BUDGET_TOGGLE_SELECTOR = 'div.settings-item:has-text("Set thinking budget") mat-slide-toggle'
-
-# 思考预算输入框：定位包含"Set thinking budget"文本的设置项，然后在其内部寻找数字输入框。
-THINKING_BUDGET_INPUT_SELECTOR = 'div.settings-item:has-text("Set thinking budget") input[type="number"]'
-
-# ==================================================================================
-# ^^^^^^^^^^^^^^^^^^^^   核心修正区域：思考模式选择器 v2.0   ^^^^^^^^^^^^^^^^^^^^^^^^
-# ==================================================================================
+# --- 思考模式相关选择器 ---
+# 主思考开关：控制是否启用思考模式（总开关）
+ENABLE_THINKING_MODE_TOGGLE_SELECTOR = '[data-test-toggle="enable-thinking"] button'
+# 手动预算开关：控制是否手动限制思考预算
+SET_THINKING_BUDGET_TOGGLE_SELECTOR = '[data-test-toggle="manual-budget"] button'
+# 思考预算输入框
+THINKING_BUDGET_INPUT_SELECTOR = '[data-test-slider] input[type="number"]'
 
 # --- Google Search Grounding ---
 GROUNDING_WITH_GOOGLE_SEARCH_TOGGLE_SELECTOR = 'div[data-test-id="searchAsAToolTooltip"] mat-slide-toggle button'
-
