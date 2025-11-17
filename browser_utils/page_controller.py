@@ -45,9 +45,6 @@ class PageController:
         self.logger.info(f"[{self.req_id}] 开始调整所有请求参数...")
         await self._check_disconnect(check_client_disconnected, "Start Parameter Adjustment")
 
-        # [FIX] 在开始调整参数前，主动清理一次可能存在的遮罩层
-        await self._dismiss_backdrops()
-
         # 调整温度
         temp_to_set = request_params.get('temperature', DEFAULT_TEMPERATURE)
         await self._adjust_temperature(temp_to_set, page_params_cache, params_cache_lock, check_client_disconnected)
@@ -84,7 +81,13 @@ class PageController:
         await self._adjust_google_search(request_params, check_client_disconnected)
 
     async def _handle_thinking_budget(self, request_params: Dict[str, Any], check_client_disconnected: Callable):
-        """处理思考模式和预算的调整逻辑。"""
+        """处理思考模式和预算的调整逻辑。
+
+        使用归一化模块将 reasoning_effort 转换为标准指令，然后根据指令控制：
+        1. 主思考开关（总开关）
+        2. 手动预算开关
+        3. 预算值输入框
+        """
         reasoning_effort = request_params.get('reasoning_effort')
 
         # 使用归一化模块标准化参数
@@ -134,7 +137,12 @@ class PageController:
             await self._set_thinking_budget_value(directive.budget_value, check_client_disconnected)
 
     async def _set_thinking_budget_value(self, token_budget: int, check_client_disconnected: Callable):
-        """设置思考预算的具体数值。"""
+        """设置思考预算的具体数值。
+
+        参数:
+            token_budget: 预算token数量（由归一化模块计算得出）
+            check_client_disconnected: 客户端断连检查回调
+        """
         self.logger.info(f"[{self.req_id}] 设置思考预算值: {token_budget} tokens")
 
         budget_input_locator = self.page.locator(THINKING_BUDGET_INPUT_SELECTOR)
@@ -200,10 +208,6 @@ class PageController:
             if should_enable_search != is_currently_checked:
                 action = "打开" if should_enable_search else "关闭"
                 self.logger.info(f"[{self.req_id}] Google Search 开关状态与期望不符。正在点击以{action}...")
-                
-                # [FIX] 在点击前尝试消除遮罩层
-                await self._dismiss_backdrops()
-                
                 await toggle_locator.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, f"Google Search 开关 - 点击{action}后")
                 await asyncio.sleep(0.5) # 等待UI更新
@@ -232,10 +236,6 @@ class PageController:
 
             if class_string and "expanded" not in class_string.split():
                 self.logger.info(f"[{self.req_id}] 工具面板未展开，正在点击以展开...")
-                
-                # [FIX] 在点击前尝试消除遮罩层
-                await self._dismiss_backdrops()
-                
                 await collapse_tools_locator.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, "展开工具面板后")
                 # 等待展开动画完成
@@ -245,6 +245,7 @@ class PageController:
                 self.logger.info(f"[{self.req_id}] 工具面板已处于展开状态。")
         except Exception as e:
             self.logger.error(f"[{self.req_id}] ❌ 展开工具面板时发生错误: {e}")
+            # 即使出错，也继续尝试执行后续操作，但记录错误
             if isinstance(e, ClientDisconnectedError):
                 raise
 
@@ -258,10 +259,6 @@ class PageController:
             is_checked = await use_url_content_selector.get_attribute("aria-checked")
             if "false" == is_checked:
                 self.logger.info(f"[{self.req_id}] URL Context 开关未开启，正在点击以开启...")
-                
-                # [FIX] 在点击前尝试消除遮罩层
-                await self._dismiss_backdrops()
-                
                 await use_url_content_selector.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, "点击URLCONTEXT后")
                 self.logger.info(f"[{self.req_id}] ✅ URL Context 开关已点击。")
@@ -273,7 +270,16 @@ class PageController:
                 raise
 
     async def _control_thinking_mode_toggle(self, should_be_enabled: bool, check_client_disconnected: Callable) -> bool:
-        """控制主思考开关（总开关），决定是否启用思考模式。"""
+        """
+        控制主思考开关（总开关），决定是否启用思考模式。
+
+        参数:
+            should_be_enabled: 期望的开关状态（True=开启, False=关闭）
+            check_client_disconnected: 客户端断开检测函数
+
+        返回:
+            bool: 是否成功设置到期望状态（如果开关不存在或被禁用，返回False）
+        """
         toggle_selector = ENABLE_THINKING_MODE_TOGGLE_SELECTOR
         self.logger.info(f"[{self.req_id}] 控制主思考开关，期望状态: {'开启' if should_be_enabled else '关闭'}...")
 
@@ -293,9 +299,6 @@ class PageController:
             if current_state_is_enabled != should_be_enabled:
                 action = "开启" if should_be_enabled else "关闭"
                 self.logger.info(f"[{self.req_id}] 主思考开关需要切换，正在点击以{action}思考模式...")
-
-                # [FIX] 在点击前尝试消除遮罩层
-                await self._dismiss_backdrops()
 
                 await toggle_locator.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, f"主思考开关 - 点击{action}后")
@@ -330,6 +333,7 @@ class PageController:
     async def _control_thinking_budget_toggle(self, should_be_checked: bool, check_client_disconnected: Callable):
         """
         根据 should_be_checked 的值，控制 "Thinking Budget" 滑块开关的状态。
+        （手动预算开关，控制是否限制思考预算）
         """
         toggle_selector = SET_THINKING_BUDGET_TOGGLE_SELECTOR
         self.logger.info(f"[{self.req_id}] 控制 'Thinking Budget' 开关，期望状态: {'选中' if should_be_checked else '未选中'}...")
@@ -346,10 +350,6 @@ class PageController:
             if current_state_is_checked != should_be_checked:
                 action = "启用" if should_be_checked else "禁用"
                 self.logger.info(f"[{self.req_id}] 思考预算开关当前状态与期望不符，正在点击以{action}...")
-                
-                # [FIX] 在点击前尝试消除遮罩层
-                await self._dismiss_backdrops()
-                
                 await toggle_locator.click(timeout=CLICK_TIMEOUT_MS)
                 await self._check_disconnect(check_client_disconnected, f"思考预算开关 - 点击{action}后")
 
@@ -368,7 +368,6 @@ class PageController:
             self.logger.error(f"[{self.req_id}] ❌ 操作 'Thinking Budget toggle' 开关时发生错误: {e}")
             if isinstance(e, ClientDisconnectedError):
                 raise
-
     async def _adjust_temperature(self, temperature: float, page_params_cache: dict, params_cache_lock: asyncio.Lock, check_client_disconnected: Callable):
         """调整温度参数。"""
         async with params_cache_lock:
