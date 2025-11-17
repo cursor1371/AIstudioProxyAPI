@@ -76,16 +76,11 @@ class PageController:
         # 调整 Google Search 开关
         await self._adjust_google_search(request_params, check_client_disconnected)
 
-    # ==================================================================================
-    # vvvvvvvvvvvvvvvvvvvv   核心修正区域：思考模式参数解析   vvvvvvvvvvvvvvvvvvvvvv
-    # ==================================================================================
     def _get_reasoning_effort_from_params(self, request_params: Dict[str, Any]) -> Optional[Any]:
         """
         从请求参数中智能提取思考模式的设置。
-        优先检查 'extra_body.google.thinking_config'，如果找到有效设置则立即返回。
-        否则，回退到顶层的 'reasoning_effort' 参数。
+        优先检查 'extra_body.google.thinking_config'，然后回退到顶层的 'reasoning_effort'。
         """
-        # 优先路径: 检查符合 Cherry Studio 等客户端的 extra_body 结构
         extra_body = request_params.get('extra_body')
         if isinstance(extra_body, dict):
             google_config = extra_body.get('google')
@@ -96,29 +91,17 @@ class PageController:
                     include_thoughts = thinking_config.get('include_thoughts')
                     thinking_budget = thinking_config.get('thinking_budget')
 
-                    # 如果明确要求关闭思考，返回0
                     if include_thoughts is False:
-                        self.logger.info(f"[{self.req_id}] 从 extra_body 解析: 关闭思考 (include_thoughts: false)。")
-                        return 0
+                        return 0  # 明确要求关闭思考
 
-                    # 如果有有效的思考预算，返回该预算值
                     if isinstance(thinking_budget, int) and thinking_budget > 0:
-                        self.logger.info(f"[{self.req_id}] 从 extra_body 解析: 使用预算 {thinking_budget}。")
-                        return thinking_budget
+                        return thinking_budget  # 使用指定的预算
 
-                    # 如果明确要求开启思考但没有指定预算，返回-1表示无限预算
                     if include_thoughts is True:
-                        self.logger.info(f"[{self.req_id}] 从 extra_body 解析: 开启思考，无预算限制。")
-                        return -1
+                        return -1  # 开启思考，但不指定预算（无限）
         
         # 回退路径: 检查顶层的 reasoning_effort 参数
-        reasoning_effort = request_params.get('reasoning_effort')
-        if reasoning_effort is not None:
-             self.logger.info(f"[{self.req_id}] 未在 extra_body 中找到有效配置，回退到顶层 'reasoning_effort' 参数。")
-        return reasoning_effort
-    # ==================================================================================
-    # ^^^^^^^^^^^^^^^^^^^^   核心修正区域：思考模式参数解析   ^^^^^^^^^^^^^^^^^^^^^^^^
-    # ==================================================================================
+        return request_params.get('reasoning_effort')
 
 
     async def _handle_thinking_budget(self, request_params: Dict[str, Any], check_client_disconnected: Callable):
