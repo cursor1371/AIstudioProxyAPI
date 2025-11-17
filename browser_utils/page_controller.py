@@ -83,7 +83,13 @@ class PageController:
         await self._adjust_google_search(request_params, check_client_disconnected)
 
     async def _handle_thinking_budget(self, request_params: Dict[str, Any], check_client_disconnected: Callable):
-        """处理思考模式和预算的调整逻辑。"""
+        """处理思考模式和预算的调整逻辑。
+
+        使用归一化模块将 reasoning_effort 转换为标准指令，然后根据指令控制：
+        1. 主思考开关（总开关）
+        2. 手动预算开关
+        3. 预算值输入框
+        """
         reasoning_effort = request_params.get('reasoning_effort')
 
         # 使用归一化模块标准化参数
@@ -133,7 +139,12 @@ class PageController:
             await self._set_thinking_budget_value(directive.budget_value, check_client_disconnected)
 
     async def _set_thinking_budget_value(self, token_budget: int, check_client_disconnected: Callable):
-        """设置思考预算的具体数值。"""
+        """设置思考预算的具体数值。
+
+        参数:
+            token_budget: 预算token数量（由归一化模块计算得出）
+            check_client_disconnected: 客户端断连检查回调
+        """
         self.logger.info(f"[{self.req_id}] 设置思考预算值: {token_budget} tokens")
 
         budget_input_locator = self.page.locator(THINKING_BUDGET_INPUT_SELECTOR)
@@ -263,6 +274,13 @@ class PageController:
     async def _control_thinking_mode_toggle(self, should_be_enabled: bool, check_client_disconnected: Callable) -> bool:
         """
         控制主思考开关（总开关），决定是否启用思考模式。
+
+        参数:
+            should_be_enabled: 期望的开关状态（True=开启, False=关闭）
+            check_client_disconnected: 客户端断开检测函数
+
+        返回:
+            bool: 是否成功设置到期望状态（如果开关不存在或被禁用，返回False）
         """
         toggle_selector = ENABLE_THINKING_MODE_TOGGLE_SELECTOR
         self.logger.info(f"[{self.req_id}] 控制主思考开关，期望状态: {'开启' if should_be_enabled else '关闭'}...")
@@ -317,6 +335,7 @@ class PageController:
     async def _control_thinking_budget_toggle(self, should_be_checked: bool, check_client_disconnected: Callable):
         """
         根据 should_be_checked 的值，控制 "Thinking Budget" 滑块开关的状态。
+        （手动预算开关，控制是否限制思考预算）
         """
         toggle_selector = SET_THINKING_BUDGET_TOGGLE_SELECTOR
         self.logger.info(f"[{self.req_id}] 控制 'Thinking Budget' 开关，期望状态: {'选中' if should_be_checked else '未选中'}...")
@@ -581,158 +600,50 @@ class PageController:
                 raise
 
     async def clear_chat_history(self, check_client_disconnected: Callable):
-        """清空聊天记录。"""
-        self.logger.info(f"[{self.req_id}] 开始清空聊天记录...")
+        """
+        清空聊天记录。
+        修正方案：由于新版 UI 移除了清空按钮，且旧的自动化点击逻辑经常失效，导致发送按钮无法启用。
+        改为直接导航到 /prompts/new_chat 页面，确保每次请求都处于绝对干净的初始状态。
+        """
+        self.logger.info(f"[{self.req_id}] 开始清空聊天记录 (策略: 导航/刷新)...")
         await self._check_disconnect(check_client_disconnected, "Start Clear Chat")
 
         try:
-            # 一般是使用流式代理时遇到,流式输出已结束,但页面上AI仍回复个不停,此时会锁住清空按钮,但页面仍是/new_chat,而跳过后续清空操作
-            # 导致后续请求无法发出而卡住,故先检查并点击发送按钮(此时是停止功能)
-            submit_button_locator = self.page.locator(SUBMIT_BUTTON_SELECTOR)
-            try:
-                self.logger.info(f"[{self.req_id}] 尝试检查发送按钮状态...")
-                # 使用较短的超时时间（1秒），避免长时间阻塞，因为这不是清空流程的常见步骤
-                await expect_async(submit_button_locator).to_be_enabled(timeout=1000)
-                self.logger.info(f"[{self.req_id}] 发送按钮可用，尝试点击并等待1秒...")
-                await submit_button_locator.click(timeout=CLICK_TIMEOUT_MS)
-                await asyncio.sleep(1.0)
-                self.logger.info(f"[{self.req_id}] 发送按钮点击并等待完成。")
-            except Exception as e_submit:
-                # 如果发送按钮不可用、超时或发生Playwright相关错误，记录日志并继续
-                self.logger.info(f"[{self.req_id}] 发送按钮不可用或检查/点击时发生Playwright错误。符合预期,继续检查清空按钮。")
+            # 目标 URL
+            target_url = "https://aistudio.google.com/prompts/new_chat"
+            
+            # 获取当前 URL
+            current_url = self.page.url
+            
+            # 定义等待页面就绪的辅助逻辑
+            async def wait_for_page_ready():
+                # 等待输入框出现且可见，这是页面加载完成的关键标志
+                prompt_textarea = self.page.locator(PROMPT_TEXTAREA_SELECTOR)
+                await expect_async(prompt_textarea).to_be_visible(timeout=WAIT_FOR_ELEMENT_TIMEOUT_MS)
 
-            clear_chat_button_locator = self.page.locator(CLEAR_CHAT_BUTTON_SELECTOR)
-            confirm_button_locator = self.page.locator(CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR)
-            overlay_locator = self.page.locator(OVERLAY_SELECTOR)
+            if "prompts/new_chat" in current_url:
+                self.logger.info(f"[{self.req_id}] 当前已在 new_chat 页面，执行 Reload 以重置状态...")
+                await self.page.reload(wait_until='domcontentloaded')
+            else:
+                self.logger.info(f"[{self.req_id}] 导航到新对话页面: {target_url}")
+                await self.page.goto(target_url, wait_until='domcontentloaded')
+            
+            await self._check_disconnect(check_client_disconnected, "清空聊天 - 导航指令发出后")
+            
+            # 等待页面元素就绪
+            await wait_for_page_ready()
+            self.logger.info(f"[{self.req_id}] ✅ 页面已重置到 new_chat 状态。")
 
-            can_attempt_clear = False
-            try:
-                await expect_async(clear_chat_button_locator).to_be_enabled(timeout=3000)
-                can_attempt_clear = True
-                self.logger.info(f"[{self.req_id}] \"清空聊天\"按钮可用，继续清空流程。")
-            except Exception as e_enable:
-                is_new_chat_url = '/prompts/new_chat' in self.page.url.rstrip('/')
-                if is_new_chat_url:
-                    self.logger.info(f"[{self.req_id}] \"清空聊天\"按钮不可用 (预期，因为在 new_chat 页面)。跳过清空操作。")
-                else:
-                    self.logger.warning(f"[{self.req_id}] 等待\"清空聊天\"按钮可用失败: {e_enable}。清空操作可能无法执行。")
-
-            await self._check_disconnect(check_client_disconnected, "清空聊天 - \"清空聊天\"按钮可用性检查后")
-
-            if can_attempt_clear:
-                await self._execute_chat_clear(clear_chat_button_locator, confirm_button_locator, overlay_locator, check_client_disconnected)
-                await self._verify_chat_cleared(check_client_disconnected)
-                self.logger.info(f"[{self.req_id}] 聊天已清空，重新启用 '临时聊天' 模式...")
-                await enable_temporary_chat_mode(self.page)
+            # 重新应用设置 (临时聊天模式等)
+            # 页面刷新后，需要重新确保环境设置正确
+            self.logger.info(f"[{self.req_id}] 聊天已清空，重新初始化环境...")
+            await enable_temporary_chat_mode(self.page)
 
         except Exception as e_clear:
             self.logger.error(f"[{self.req_id}] 清空聊天过程中发生错误: {e_clear}")
             if not (isinstance(e_clear, ClientDisconnectedError) or (hasattr(e_clear, 'name') and 'Disconnect' in e_clear.name)):
                 await save_error_snapshot(f"clear_chat_error_{self.req_id}")
             raise
-
-    async def _execute_chat_clear(self, clear_chat_button_locator, confirm_button_locator, overlay_locator, check_client_disconnected: Callable):
-        """执行清空聊天操作"""
-        overlay_initially_visible = False
-        try:
-            if await overlay_locator.is_visible(timeout=1000):
-                overlay_initially_visible = True
-                self.logger.info(f"[{self.req_id}] 清空聊天确认遮罩层已可见。直接点击\"继续\"。")
-        except TimeoutError:
-            self.logger.info(f"[{self.req_id}] 清空聊天确认遮罩层初始不可见 (检查超时或未找到)。")
-            overlay_initially_visible = False
-        except Exception as e_vis_check:
-            self.logger.warning(f"[{self.req_id}] 检查遮罩层可见性时发生错误: {e_vis_check}。假定不可见。")
-            overlay_initially_visible = False
-
-        await self._check_disconnect(check_client_disconnected, "清空聊天 - 初始遮罩层检查后")
-
-        if overlay_initially_visible:
-            self.logger.info(f"[{self.req_id}] 点击\"继续\"按钮 (遮罩层已存在): {CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR}")
-            try:
-                await expect_async(confirm_button_locator.first).to_be_visible(timeout=3000)
-                await confirm_button_locator.first.click(timeout=CLICK_TIMEOUT_MS)
-            except Exception as e:
-                self.logger.warning(f"[{self.req_id}] 点击确认按钮失败，尝试强制点击: {e}")
-                await confirm_button_locator.first.evaluate("el => el.click()")
-        else:
-            self.logger.info(f"[{self.req_id}] 点击\"清空聊天\"按钮: {CLEAR_CHAT_BUTTON_SELECTOR}")
-            # 若存在透明遮罩层拦截指针事件，先尝试清理
-            try:
-                await self._dismiss_backdrops()
-            except Exception:
-                pass
-            try:
-                await clear_chat_button_locator.click(timeout=CLICK_TIMEOUT_MS)
-            except Exception as first_click_err:
-                # 尝试再次清理遮罩，并使用 force 点击作为兜底
-                self.logger.warning(f"[{self.req_id}] 清空按钮第一次点击失败，尝试清理遮罩并强制点击: {first_click_err}")
-                try:
-                    await self._dismiss_backdrops()
-                except Exception:
-                    pass
-                try:
-                    await clear_chat_button_locator.click(timeout=CLICK_TIMEOUT_MS, force=True)
-                except Exception as force_click_err:
-                    self.logger.error(f"[{self.req_id}] 清空按钮强制点击仍失败: {force_click_err}")
-                    raise
-            await self._check_disconnect(check_client_disconnected, "清空聊天 - 点击\"清空聊天\"后")
-
-            try:
-                self.logger.info(f"[{self.req_id}] 等待清空聊天确认遮罩层出现: {OVERLAY_SELECTOR}")
-                await expect_async(overlay_locator).to_be_visible(timeout=WAIT_FOR_ELEMENT_TIMEOUT_MS)
-                self.logger.info(f"[{self.req_id}] 清空聊天确认遮罩层已出现。")
-            except TimeoutError:
-                error_msg = f"等待清空聊天确认遮罩层超时 (点击清空按钮后)。请求 ID: {self.req_id}"
-                self.logger.error(error_msg)
-                await save_error_snapshot(f"clear_chat_overlay_timeout_{self.req_id}")
-                raise Exception(error_msg)
-
-            await self._check_disconnect(check_client_disconnected, "清空聊天 - 遮罩层出现后")
-            self.logger.info(f"[{self.req_id}] 点击\"继续\"按钮 (在对话框中)...")
-            
-            # [修正] 增加对按钮可见性的显式等待和失败后的兜底操作
-            try:
-                await expect_async(confirm_button_locator.first).to_be_visible(timeout=3000)
-                await confirm_button_locator.first.click(timeout=CLICK_TIMEOUT_MS)
-            except Exception as e:
-                self.logger.warning(f"[{self.req_id}] 常规点击确认按钮失败，尝试 JS 强制点击: {e}")
-                await confirm_button_locator.first.evaluate("el => el.click()")
-
-        await self._check_disconnect(check_client_disconnected, "清空聊天 - 点击\"继续\"后")
-
-        # 等待对话框消失
-        max_retries_disappear = 3
-        for attempt_disappear in range(max_retries_disappear):
-            try:
-                self.logger.info(f"[{self.req_id}] 等待清空聊天确认按钮/对话框消失 (尝试 {attempt_disappear + 1}/{max_retries_disappear})...")
-                await expect_async(confirm_button_locator).to_be_hidden(timeout=CLEAR_CHAT_VERIFY_TIMEOUT_MS)
-                await expect_async(overlay_locator).to_be_hidden(timeout=1000)
-                self.logger.info(f"[{self.req_id}] ✅ 清空聊天确认对话框已成功消失。")
-                break
-            except TimeoutError:
-                self.logger.warning(f"[{self.req_id}] ⚠️ 等待清空聊天确认对话框消失超时 (尝试 {attempt_disappear + 1}/{max_retries_disappear})。")
-                if attempt_disappear < max_retries_disappear - 1:
-                    await asyncio.sleep(1.0)
-                    await self._check_disconnect(check_client_disconnected, f"清空聊天 - 重试消失检查 {attempt_disappear + 1} 前")
-                    continue
-                else:
-                    error_msg = f"达到最大重试次数。清空聊天确认对话框未消失。请求 ID: {self.req_id}"
-                    self.logger.error(error_msg)
-                    await save_error_snapshot(f"clear_chat_dialog_disappear_timeout_{self.req_id}")
-                    raise Exception(error_msg)
-            except ClientDisconnectedError:
-                self.logger.info(f"[{self.req_id}] 客户端在等待清空确认对话框消失时断开连接。")
-                raise
-            except Exception as other_err:
-                self.logger.warning(f"[{self.req_id}] 等待清空确认对话框消失时发生其他错误: {other_err}")
-                if attempt_disappear < max_retries_disappear - 1:
-                    await asyncio.sleep(1.0)
-                    continue
-                else:
-                    raise
-
-            await self._check_disconnect(check_client_disconnected, f"清空聊天 - 消失检查尝试 {attempt_disappear + 1} 后")
 
     async def _dismiss_backdrops(self):
         """尝试关闭可能残留的 cdk 透明遮罩层以避免点击被拦截。"""
@@ -755,17 +666,6 @@ class PageController:
                     break
         except Exception:
             pass
-
-    async def _verify_chat_cleared(self, check_client_disconnected: Callable):
-        """验证聊天已清空"""
-        last_response_container = self.page.locator(RESPONSE_CONTAINER_SELECTOR).last
-        await asyncio.sleep(0.5)
-        await self._check_disconnect(check_client_disconnected, "After Clear Post-Delay")
-        try:
-            await expect_async(last_response_container).to_be_hidden(timeout=CLEAR_CHAT_VERIFY_TIMEOUT_MS - 500)
-            self.logger.info(f"[{self.req_id}] ✅ 聊天已成功清空 (验证通过 - 最后响应容器隐藏)。")
-        except Exception as verify_err:
-            self.logger.warning(f"[{self.req_id}] ⚠️ 警告: 清空聊天验证失败 (最后响应容器未隐藏): {verify_err}")
     
     # 已移除直接设置 <input type=file> 的上传路径，统一采用菜单上传方式
 
@@ -916,20 +816,25 @@ class PageController:
         """提交提示到页面。"""
         self.logger.info(f"[{self.req_id}] 填充并提交提示 ({len(prompt)} chars)...")
         prompt_textarea_locator = self.page.locator(PROMPT_TEXTAREA_SELECTOR)
-        # autosize_wrapper_locator = self.page.locator('ms-prompt-input-wrapper ms-autosize-textarea') # Unused in new fill method
+        autosize_wrapper_locator = self.page.locator('ms-prompt-input-wrapper ms-autosize-textarea')
         submit_button_locator = self.page.locator(SUBMIT_BUTTON_SELECTOR)
 
         try:
             await expect_async(prompt_textarea_locator).to_be_visible(timeout=5000)
             await self._check_disconnect(check_client_disconnected, "After Input Visible")
 
-            # [修正] 使用原生方法填充文本，以触发前端框架的状态更新
-            await prompt_textarea_locator.click()
-            await prompt_textarea_locator.fill(prompt)
-            # 双重保险：模拟键盘操作确保 dirty 状态被触发，从而激活发送按钮
-            await prompt_textarea_locator.press("Space")
-            await prompt_textarea_locator.press("Backspace")
-
+            # 使用 JavaScript 填充文本
+            await prompt_textarea_locator.evaluate(
+                '''
+                (element, text) => {
+                    element.value = text;
+                    element.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+                    element.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                }
+                ''',
+                prompt
+            )
+            await autosize_wrapper_locator.evaluate('(element, text) => { element.setAttribute("data-value", text); }', prompt)
             await self._check_disconnect(check_client_disconnected, "After Input Fill")
 
             # 上传（仅使用菜单 + 隐藏 input 设置文件；处理可能的授权弹窗）
