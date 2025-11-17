@@ -1,9 +1,15 @@
+{
+type: uploaded file
+fileName: cjackhwang/aistudioproxyapi/AIstudioProxyAPI-b3a537bb42934d6dba91b5b78e11a9c311f1117a/browser_utils/page_controller.py
+fullContent:
 """
 PageController模块
 封装了所有与Playwright页面直接交互的复杂逻辑。
 """
 import asyncio
 import re
+import base64
+import mimetypes
 from typing import Callable, List, Dict, Any, Optional
 
 from playwright.async_api import Page as AsyncPage, expect as expect_async, TimeoutError
@@ -666,7 +672,8 @@ class PageController:
 
         if overlay_initially_visible:
             self.logger.info(f"[{self.req_id}] 点击\"继续\"按钮 (遮罩层已存在): {CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR}")
-            await confirm_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+            # 使用 force=True 防止被透明层阻挡，并增加超时时间
+            await confirm_button_locator.click(timeout=5000, force=True)
         else:
             self.logger.info(f"[{self.req_id}] 点击\"清空聊天\"按钮: {CLEAR_CHAT_BUTTON_SELECTOR}")
             # 若存在透明遮罩层拦截指针事件，先尝试清理
@@ -702,7 +709,8 @@ class PageController:
 
             await self._check_disconnect(check_client_disconnected, "清空聊天 - 遮罩层出现后")
             self.logger.info(f"[{self.req_id}] 点击\"继续\"按钮 (在对话框中): {CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR}")
-            await confirm_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+            # 使用 force=True 防止被透明层阻挡，并增加超时时间
+            await confirm_button_locator.click(timeout=5000, force=True)
 
         await self._check_disconnect(check_client_disconnected, "清空聊天 - 点击\"继续\"后")
 
@@ -942,6 +950,31 @@ class PageController:
             await autosize_wrapper_locator.evaluate('(element, text) => { element.setAttribute("data-value", text); }', prompt)
             await self._check_disconnect(check_client_disconnected, "After Input Fill")
 
+            # 激活输入框状态：通过真实的 Focus 和键盘事件确保 Angular 检测到变更
+            try:
+                await prompt_textarea_locator.focus()
+                # 简短等待让 JS 事件传播
+                await asyncio.sleep(0.2)
+                
+                # 检查发送按钮是否启用，如果未启用，尝试物理按键触发
+                # 确保定位到可见的发送按钮，防止 DOM 中存在隐藏的禁用按钮干扰判断
+                visible_submit_button = submit_button_locator.locator("visible=true").first
+                
+                # 如果没有找到可见按钮，可能会抛出异常，但这在 submit 前属于预期外的 DOM 状态
+                # 这里使用 try-expect 包装，或者直接 check
+                if await visible_submit_button.count() > 0:
+                     if await visible_submit_button.is_disabled():
+                         self.logger.info(f"[{self.req_id}] 提交按钮未激活，执行键盘物理触发 (Space + Backspace)...")
+                         await prompt_textarea_locator.press("Space")
+                         await asyncio.sleep(0.1)
+                         await prompt_textarea_locator.press("Backspace")
+                         await asyncio.sleep(0.2)
+                else:
+                     self.logger.warning(f"[{self.req_id}] 未找到可见的提交按钮，可能有误。")
+
+            except Exception as e_trigger:
+                self.logger.warning(f"[{self.req_id}] 尝试物理触发输入框时出现非致命错误: {e_trigger}")
+
             # 上传（仅使用菜单 + 隐藏 input 设置文件；处理可能的授权弹窗）
             try:
                 self.logger.info(f"[{self.req_id}] 待上传附件数量: {len(image_list)}")
@@ -956,7 +989,9 @@ class PageController:
             wait_timeout_ms_submit_enabled = 100000
             try:
                 await self._check_disconnect(check_client_disconnected, "填充提示后等待发送按钮启用 - 前置检查")
-                await expect_async(submit_button_locator).to_be_enabled(timeout=wait_timeout_ms_submit_enabled)
+                # 使用 filter 确保我们等待的是可见的那个按钮
+                real_submit_button = submit_button_locator.locator("visible=true").first
+                await expect_async(real_submit_button).to_be_enabled(timeout=wait_timeout_ms_submit_enabled)
                 self.logger.info(f"[{self.req_id}] ✅ 发送按钮已启用。")
             except Exception as e_pw_enabled:
                 self.logger.error(f"[{self.req_id}] ❌ 等待发送按钮启用超时或错误: {e_pw_enabled}")
@@ -972,7 +1007,11 @@ class PageController:
                 self.logger.info(f"[{self.req_id}] 尝试点击提交按钮...")
                 # 提交前再处理一次潜在对话框，避免按钮点击被拦截
                 await self._handle_post_upload_dialog()
-                await submit_button_locator.click(timeout=5000)
+                
+                # 点击可见的按钮
+                real_submit_button = submit_button_locator.locator("visible=true").first
+                await real_submit_button.click(timeout=5000)
+                
                 self.logger.info(f"[{self.req_id}] ✅ 提交按钮点击完成。")
                 button_clicked = True
             except Exception as click_err:
@@ -1162,7 +1201,9 @@ class PageController:
                 if not submission_success:
                     submit_button_locator = self.page.locator(SUBMIT_BUTTON_SELECTOR)
                     try:
-                        is_disabled = await submit_button_locator.is_disabled(timeout=2000)
+                        # 同样需要检查可见的按钮
+                        visible_submit = submit_button_locator.locator("visible=true").first
+                        is_disabled = await visible_submit.is_disabled(timeout=2000)
                         if is_disabled:
                             self.logger.info(f"[{self.req_id}] 验证方法2: 提交按钮已禁用，回车键提交成功")
                             submission_success = True
@@ -1258,7 +1299,9 @@ class PageController:
                 if not submission_success:
                     submit_button_locator = self.page.locator(SUBMIT_BUTTON_SELECTOR)
                     try:
-                        is_disabled = await submit_button_locator.is_disabled(timeout=2000)
+                         # 同样需要检查可见的按钮
+                        visible_submit = submit_button_locator.locator("visible=true").first
+                        is_disabled = await visible_submit.is_disabled(timeout=2000)
                         if is_disabled:
                             self.logger.info(f"[{self.req_id}] 验证方法2: 提交按钮已禁用，组合键提交成功")
                             submission_success = True
@@ -1334,3 +1377,4 @@ class PageController:
             if not isinstance(e, ClientDisconnectedError):
                 await save_error_snapshot(f"get_response_error_{self.req_id}")
             raise
+}
