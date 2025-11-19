@@ -44,13 +44,21 @@ TOP_P_INPUT_SELECTOR = 'ms-slider input[type="number"][max="1"]'
 TEMPERATURE_INPUT_SELECTOR = 'ms-slider input[type="number"][max="2"]'
 USE_URL_CONTEXT_SELECTOR = 'button[aria-label="Browse the url context"]'
 
-# --- 思考模式相关选择器 ---
+# --- 思考模式相关选择器 (Old/Gemini 2.5) ---
 # 主思考开关：控制是否启用思考模式（总开关）
 ENABLE_THINKING_MODE_TOGGLE_SELECTOR = '[data-test-toggle="enable-thinking"] button'
 # 手动预算开关：控制是否手动限制思考预算
 SET_THINKING_BUDGET_TOGGLE_SELECTOR = '[data-test-toggle="manual-budget"] button'
 # 思考预算输入框
 THINKING_BUDGET_INPUT_SELECTOR = '[data-test-slider] input[type="number"]'
+
+# --- 思考模式相关选择器 (New/Gemini 3.0) ---
+# 思考等级下拉框 (通常在 ms-thinking-level-setting 组件内)
+THINKING_LEVEL_SELECT_SELECTOR = 'ms-thinking-level-setting mat-select'
+# 媒体分辨率下拉框
+MEDIA_RESOLUTION_SELECT_SELECTOR = 'div[data-test-id="mediaResolution"] mat-select'
+# 通用下拉框选项 (用于在打开的 mat-select 面板中查找选项)
+MAT_OPTION_SELECTOR = 'mat-option'
 
 # --- Google Search Grounding ---
 GROUNDING_WITH_GOOGLE_SEARCH_TOGGLE_SELECTOR = 'div[data-test-id="searchAsAToolTooltip"] mat-slide-toggle button'
