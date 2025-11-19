@@ -4,7 +4,7 @@ import asyncio
 import re
 from typing import Callable, List, Dict, Any, Optional
 
-from playwright.async_api import Page as AsyncPage, expect as expect_async, TimeoutError
+from playwright.async_api import Page as AsyncPage, expect as expect_async, TimeoutError, Locator
 
 from config import (
     TEMPERATURE_INPUT_SELECTOR, MAX_OUTPUT_TOKENS_SELECTOR, STOP_SEQUENCE_INPUT_SELECTOR,
@@ -12,6 +12,7 @@ from config import (
     PROMPT_TEXTAREA_SELECTOR, RESPONSE_CONTAINER_SELECTOR, RESPONSE_TEXT_SELECTOR,
     EDIT_MESSAGE_BUTTON_SELECTOR, USE_URL_CONTEXT_SELECTOR, UPLOAD_BUTTON_SELECTOR,
     ENABLE_THINKING_MODE_TOGGLE_SELECTOR, SET_THINKING_BUDGET_TOGGLE_SELECTOR, THINKING_BUDGET_INPUT_SELECTOR,
+    THINKING_LEVEL_SELECT_SELECTOR, MEDIA_RESOLUTION_SELECT_SELECTOR, MAT_OPTION_SELECTOR,
     GROUNDING_WITH_GOOGLE_SEARCH_TOGGLE_SELECTOR, AI_STUDIO_URL_PATTERN
 )
 from config import (
@@ -70,8 +71,11 @@ class PageController:
         else:
             self.logger.info(f"[{self.req_id}] URL Context 功能已禁用，跳过调整。")
 
-        # 调整“思考预算”
+        # 调整“思考预算” (Gemini 2.5 & 3.0 兼容)
         await self._handle_thinking_budget(request_params, check_client_disconnected)
+
+        # 调整 Media Resolution (Gemini 3.0 新增)
+        await self._adjust_media_resolution(request_params, check_client_disconnected)
 
         # 调整 Google Search 开关
         await self._adjust_google_search(request_params, check_client_disconnected)
@@ -79,71 +83,156 @@ class PageController:
     def _get_reasoning_effort_from_params(self, request_params: Dict[str, Any]) -> Optional[Any]:
         """
         从请求参数中智能提取思考模式的设置。
-        优先检查 'extra_body.google.thinking_config'，然后回退到顶层的 'reasoning_effort'。
+        优先检查 'extra_body.generationConfig.thinkingConfig.thinkingLevel' (新版)
+        或 'extra_body.google.thinking_config' (旧版/Cherry Studio)
+        最后回退到 'reasoning_effort'。
         """
         extra_body = request_params.get('extra_body')
         if isinstance(extra_body, dict):
+            # 1. Gemini 3.0 style / Google API style
+            generation_config = extra_body.get('generationConfig')
+            if isinstance(generation_config, dict):
+                thinking_config = generation_config.get('thinkingConfig')
+                if isinstance(thinking_config, dict):
+                    level = thinking_config.get('thinkingLevel')
+                    if level: 
+                        self.logger.info(f"[{self.req_id}] 检测到 thinkingLevel: {level}")
+                        return level
+
+            # 2. Cherry Studio style
             google_config = extra_body.get('google')
             if isinstance(google_config, dict):
                 thinking_config = google_config.get('thinking_config')
                 if isinstance(thinking_config, dict):
-                    self.logger.info(f"[{self.req_id}] 检测到 'extra_body.google.thinking_config'。")
-                    include_thoughts = thinking_config.get('include_thoughts')
+                    self.logger.info(f"[{self.req_id}] 检测到 thinking_config (Cherry Studio style)。")
                     thinking_budget = thinking_config.get('thinking_budget')
+                    include_thoughts = thinking_config.get('include_thoughts')
 
-                    if include_thoughts is False:
-                        return 0  # 明确要求关闭思考
-
-                    if isinstance(thinking_budget, int) and thinking_budget > 0:
-                        return thinking_budget  # 使用指定的预算
-
-                    if include_thoughts is True:
-                        return -1  # 开启思考，但不指定预算（无限）
+                    if include_thoughts is False: return 0
+                    if thinking_budget and isinstance(thinking_budget, int) and thinking_budget > 0: return thinking_budget
+                    if include_thoughts is True: return -1
         
-        # 回退路径: 检查顶层的 reasoning_effort 参数
+        # 3. Standard OpenAI style
         return request_params.get('reasoning_effort')
 
+    def _get_media_resolution_from_params(self, request_params: Dict[str, Any]) -> Optional[str]:
+        """提取 Media Resolution 参数"""
+        extra_body = request_params.get('extra_body')
+        if isinstance(extra_body, dict):
+            # 检查 generationConfig (新版) 或 google (旧习惯，防止有客户端放这里)
+            for key in ['generationConfig', 'google']:
+                config_sect = extra_body.get(key)
+                if isinstance(config_sect, dict):
+                    val = config_sect.get('mediaResolution')
+                    if val: return val
+        return None
 
     async def _handle_thinking_budget(self, request_params: Dict[str, Any], check_client_disconnected: Callable):
-        """处理思考模式和预算的调整逻辑。"""
+        """处理思考模式和预算的调整逻辑，自动适配 Gemini 3 (UI: Dropdown) 和 Gemini 2.5 (UI: Slider)。"""
         
-        reasoning_effort = self._get_reasoning_effort_from_params(request_params)
-        directive = normalize_reasoning_effort(reasoning_effort)
+        raw_val = self._get_reasoning_effort_from_params(request_params)
+        directive = normalize_reasoning_effort(raw_val)
         self.logger.info(f"[{self.req_id}] 思考模式指令: {format_directive_log(directive)}")
 
-        # 尝试设置主思考开关
-        thinking_toggle_success = await self._control_thinking_mode_toggle(
+        # 1. 尝试控制主开关 
+        # Gemini 2.5: 有开关，可操作。
+        # Gemini 3: 有些版本无开关(强制开启)，有些版本开关可能被移除。
+        # 这里的逻辑会尝试设置，如果被禁用但状态正确，也会通过。
+        await self._control_thinking_mode_toggle(
             should_be_enabled=directive.thinking_enabled,
             check_client_disconnected=check_client_disconnected
         )
-        
-        # 如果主思考开关操作失败（例如，因为UI禁用且状态冲突），则不再继续
-        if not thinking_toggle_success:
-            self.logger.warning(f"[{self.req_id}] 主思考开关未能设置为期望状态，将中止思考预算的后续调整。")
+
+        # 如果指令是关闭思考，且已成功，则退出
+        if not directive.thinking_enabled:
             return
 
-        # 如果指令是关闭思考，且已成功（或已处于关闭状态），则直接返回
-        if not directive.thinking_enabled:
-            self.logger.info(f"[{self.req_id}] 思考模式已关闭或已设置为关闭，无需调整预算。")
-            return
-            
-        # 主思考开关已成功开启，现在根据指令调整预算
-        if not directive.budget_enabled:
-            self.logger.info(f"[{self.req_id}] 关闭手动预算限制...")
-            await self._control_thinking_budget_toggle(should_be_checked=False, check_client_disconnected=check_client_disconnected)
-        else:
-            self.logger.info(f"[{self.req_id}] 开启手动预算限制并设置预算值: {directive.budget_value} tokens")
+        # 2. 探测并设置 Thinking Level (Gemini 3 新 UI)
+        # 如果页面上有 Thinking Level 下拉框，我们就用它
+        if directive.thinking_level:
+            applied_new_ui = await self._set_thinking_level(directive.thinking_level, check_client_disconnected)
+            if applied_new_ui:
+                self.logger.info(f"[{self.req_id}] 已通过 Thinking Level 下拉菜单完成配置。")
+                return
+
+        # 3. 探测并设置 Thinking Budget (Gemini 2.5 旧 UI)
+        # 如果新 UI 设置失败(或者没有新 UI)，且有预算限制需求，则尝试旧逻辑
+        if directive.budget_enabled:
+            self.logger.info(f"[{self.req_id}] 未检测到或不需要 Level 配置，尝试设置 Thinking Budget (旧版逻辑)...")
+            # 确保手动预算开关被开启
             await self._control_thinking_budget_toggle(should_be_checked=True, check_client_disconnected=check_client_disconnected)
-            await self._set_thinking_budget_value(directive.budget_value, check_client_disconnected)
+            # 设置数值
+            if directive.budget_value:
+                await self._set_thinking_budget_value(directive.budget_value, check_client_disconnected)
+        else:
+            # 开启了思考但无预算限制 (Infinite)，确保手动开关关闭
+            await self._control_thinking_budget_toggle(should_be_checked=False, check_client_disconnected=check_client_disconnected)
+
+    async def _select_mat_option(self, select_locator: Locator, option_text_contains: str, setting_name: str, check_client_disconnected: Callable) -> bool:
+        """通用 helper: 操作 mat-select 下拉菜单。"""
+        try:
+            if not await select_locator.is_visible(timeout=2000):
+                return False # 元素不存在
+
+            # 检查当前值，如果已匹配则跳过
+            current_val = await select_locator.inner_text()
+            target_keyword = option_text_contains.split('_')[-1].capitalize() # e.g. MEDIA_RESOLUTION_HIGH -> High
+            if target_keyword.upper() == "UNSPECIFIED": target_keyword = "Default" # Special case
+
+            if target_keyword.lower() in current_val.lower():
+                self.logger.info(f"[{self.req_id}] {setting_name} 当前值 '{current_val}' 已匹配 '{target_keyword}'，跳过。")
+                return True
+
+            self.logger.info(f"[{self.req_id}] 正在设置 {setting_name} 为: {target_keyword} ...")
+            await select_locator.click()
+            await self._check_disconnect(check_client_disconnected, f"Open {setting_name}")
+            
+            # 查找并点击选项
+            option_locator = self.page.locator(MAT_OPTION_SELECTOR).filter(has_text=re.compile(target_keyword, re.IGNORECASE))
+            if await option_locator.count() > 0:
+                await option_locator.first.click()
+                self.logger.info(f"[{self.req_id}] ✅ {setting_name} 已设置为: {target_keyword}")
+                return True
+            else:
+                self.logger.warning(f"[{self.req_id}] ⚠️ 未找到 {setting_name} 选项: {target_keyword}，尝试关闭菜单。")
+                await self.page.keyboard.press("Escape")
+                return False
+        except Exception as e:
+            self.logger.warning(f"[{self.req_id}] 设置 {setting_name} 时出错 (非致命): {e}")
+            try: await self.page.keyboard.press("Escape")
+            except: pass
+            return False
+
+    async def _set_thinking_level(self, level_str: str, check_client_disconnected: Callable) -> bool:
+        """设置 Gemini 3 的 Thinking Level"""
+        select_locator = self.page.locator(THINKING_LEVEL_SELECT_SELECTOR)
+        return await self._select_mat_option(select_locator, level_str, "Thinking Level", check_client_disconnected)
+
+    async def _adjust_media_resolution(self, request_params: Dict[str, Any], check_client_disconnected: Callable):
+        """设置 Gemini 3 的 Media Resolution"""
+        res_str = self._get_media_resolution_from_params(request_params)
+        if not res_str: return
+        
+        select_locator = self.page.locator(MEDIA_RESOLUTION_SELECT_SELECTOR)
+        await self._select_mat_option(select_locator, res_str, "Media Resolution", check_client_disconnected)
 
     async def _set_thinking_budget_value(self, token_budget: int, check_client_disconnected: Callable):
-        """设置思考预算的具体数值。"""
+        """设置思考预算的具体数值 (旧版/Gemini 2.5)。"""
         self.logger.info(f"[{self.req_id}] 设置思考预算值: {token_budget} tokens")
         budget_input_locator = self.page.locator(THINKING_BUDGET_INPUT_SELECTOR)
         try:
+            if not await budget_input_locator.is_visible(timeout=3000):
+                self.logger.info(f"[{self.req_id}] Thinking Budget 输入框不可见，可能是新UI，跳过。")
+                return
+
             await expect_async(budget_input_locator).to_be_visible(timeout=5000)
             await self._check_disconnect(check_client_disconnected, "思考预算调整 - 输入框可见后")
             
+            # 检查当前值
+            curr_val = await budget_input_locator.input_value()
+            if curr_val and int(curr_val) == token_budget:
+                return
+
             self.logger.info(f"[{self.req_id}] 设置思考预算为: {token_budget}")
             await budget_input_locator.fill(str(token_budget), timeout=5000)
             await self._check_disconnect(check_client_disconnected, "思考预算调整 - 填充输入框后")
@@ -185,7 +274,11 @@ class PageController:
         toggle_selector = GROUNDING_WITH_GOOGLE_SEARCH_TOGGLE_SELECTOR
         try:
             toggle_locator = self.page.locator(toggle_selector)
-            await expect_async(toggle_locator).to_be_visible(timeout=5000)
+            # 降低超时，因为部分模型可能不支持搜索
+            if not await toggle_locator.is_visible(timeout=3000):
+                self.logger.info(f"[{self.req_id}] Google Search 开关不可见，跳过。")
+                return
+
             await self._check_disconnect(check_client_disconnected, "Google Search 开关 - 元素可见后")
 
             is_checked_str = await toggle_locator.get_attribute("aria-checked")
@@ -236,7 +329,9 @@ class PageController:
         try:
             self.logger.info(f"[{self.req_id}] 检查并启用 URL Context 开关...")
             use_url_content_selector = self.page.locator(USE_URL_CONTEXT_SELECTOR)
-            await expect_async(use_url_content_selector).to_be_visible(timeout=5000)
+            # 缩短超时，不影响主流程
+            if not await use_url_content_selector.is_visible(timeout=3000):
+                return
             
             is_checked = await use_url_content_selector.get_attribute("aria-checked")
             if "false" == is_checked:
@@ -256,18 +351,22 @@ class PageController:
         self.logger.info(f"[{self.req_id}] 控制主思考开关，期望状态: {'开启' if should_be_enabled else '关闭'}...")
         try:
             toggle_locator = self.page.locator(toggle_selector)
-            await expect_async(toggle_locator).to_be_visible(timeout=5000)
+            # 降低超时，兼容无此开关的模型
+            if not await toggle_locator.is_visible(timeout=2000):
+                self.logger.info(f"[{self.req_id}] 主思考开关不可见 (可能当前模型无此开关)。")
+                return False
+
             await self._check_disconnect(check_client_disconnected, "主思考开关 - 元素可见后")
 
             if await toggle_locator.is_disabled(timeout=1000):
-                self.logger.info(f"[{self.req_id}] 主思考开关被禁用 (UI上为灰色)。")
+                self.logger.info(f"[{self.req_id}] 主思考开关被禁用。")
                 is_checked_str = await toggle_locator.get_attribute("aria-checked")
                 current_state_is_enabled = is_checked_str == "true"
                 if current_state_is_enabled == should_be_enabled:
-                    self.logger.info(f"[{self.req_id}] ✅ 被禁用的主思考开关状态已符合预期，无需操作。")
+                    self.logger.info(f"[{self.req_id}] ✅ 被禁用的主思考开关状态已符合预期。")
                     return True
                 else:
-                    self.logger.error(f"[{self.req_id}] ❌ 无法设置思考模式：开关被禁用且其状态({current_state_is_enabled})与期望状态({should_be_enabled})冲突。")
+                    self.logger.error(f"[{self.req_id}] ❌ 无法设置思考模式：开关被禁用且状态冲突。")
                     return False
 
             is_checked_str = await toggle_locator.get_attribute("aria-checked")
@@ -291,12 +390,8 @@ class PageController:
             else:
                 self.logger.info(f"[{self.req_id}] 主思考开关已处于期望状态，无需操作。")
                 return True
-        except TimeoutError:
-            self.logger.warning(f"[{self.req_id}] ⚠️ 主思考开关元素未找到或不可见（当前模型可能不支持思考模式）")
-            return False
         except Exception as e:
-            self.logger.error(f"[{self.req_id}] ❌ 操作主思考开关时发生错误: {e}")
-            await save_error_snapshot(f"thinking_mode_toggle_error_{self.req_id}")
+            self.logger.warning(f"[{self.req_id}] 操作主思考开关时出错 (忽略): {e}")
             if isinstance(e, ClientDisconnectedError): raise
             return False
 
@@ -306,7 +401,10 @@ class PageController:
         self.logger.info(f"[{self.req_id}] 控制 'Thinking Budget' 开关，期望状态: {'选中' if should_be_checked else '未选中'}...")
         try:
             toggle_locator = self.page.locator(toggle_selector)
-            await expect_async(toggle_locator).to_be_visible(timeout=5000)
+            if not await toggle_locator.is_visible(timeout=2000):
+                self.logger.info(f"[{self.req_id}] Thinking Budget 开关不可见，跳过。")
+                return
+
             await self._check_disconnect(check_client_disconnected, "思考预算开关 - 元素可见后")
             is_checked_str = await toggle_locator.get_attribute("aria-checked")
             current_state_is_checked = is_checked_str == "true"
@@ -366,7 +464,7 @@ class PageController:
                         self.logger.warning(f"[{self.req_id}] ⚠️ 温度更新后验证失败。页面显示: {new_temp_float}, 期望: {clamped_temp}。清除缓存中的温度。")
                         page_params_cache.pop("temperature", None)
                         await save_error_snapshot(f"temperature_verify_fail_{self.req_id}")
-            except (ValueError, TypeError) as ve:
+            except ValueError as ve:
                 self.logger.error(f"[{self.req_id}] 转换温度值为浮点数时出错. 错误: {ve}。清除缓存中的温度。")
                 page_params_cache.pop("temperature", None)
                 await save_error_snapshot(f"temperature_value_error_{self.req_id}")
